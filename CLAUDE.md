@@ -97,7 +97,7 @@ make release    # Apple 芯片 + Intel 通用版 zip（build/QuotaPet-<版本>.z
 - `make previews` 会额外生成 `popover-live.png` 和 `popover-live-dark.png`，用的是**本机真实额度数据**（Claude 和 Codex），不能复制进 `docs/images/` 或提交；其余预览图都是假数据。
 - `make dump` 和 `usage_lab.py` 的输出、`snapshots.jsonl`、`intervals.jsonl` 都是真实数据，不进 git，也不贴进 issue 或 PR。
 - `.githooks/pre-commit` 会在提交时拦住 `.jsonl` 文件、截图、`popover-live*`、本机绝对路径和不是 noreply 的邮箱。它是用 `git config core.hooksPath .githooks` 启用的，被拦了就改内容，不要加 `--no-verify` 绕过。
-  - 云端会话（claude.ai/code）启动时 `.claude/hooks/session-start.sh` 会自动启用它，并把这个 clone 的提交身份换成 GitHub noreply 地址（云端默认的 `noreply@anthropic.com` 会被它和 CI 拦下）。不要再把身份改回去。
+  - 云端会话（claude.ai/code）启动时 `.claude/hooks/session-start.sh` 先把这个 clone 的提交身份换成登录的 GitHub 账号的 noreply 地址（云端默认的 `noreply@anthropic.com` 会被它和 CI 拦下；`gh` 用不了时，本仓库用主人的地址），有了 noreply 身份才启用它。不要再把身份改回去。
 - 发 Release 的包也不能带本机信息：`build-app.sh` 会 `strip -S` 去掉调试符号（里面记着编译时的本机绝对路径和用户名），`make release` 打完包会查一遍 `/Users/`，有就失败。
 
 ## 什么时候用哪个技能
