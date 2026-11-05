@@ -30,9 +30,10 @@ final class UsageStore: ObservableObject {
     /// 正在监听的目录（启动时还不存在的目录，兜底刷新时会补上）
     private var watchedPaths: [String] = []
     private var pollTimer: Timer?
-    private var debounce: Task<Void, Never>?
-    /// 等着防抖结束再刷新的几家
-    private var debounced: Set<ProviderID> = []
+    /// 文件变了、等着开始重算的几家（每家一个），见 scheduleRefresh
+    private var pendingEvents: [ProviderID: Task<Void, Never>] = [:]
+    /// 文件事件触发的重算的限频：同一家至少隔 5 秒（规则在 Core 里，能进自检）
+    private var throttle = RefreshThrottle()
     /// 正在算的几家，和算的时候又有新变化、算完要再算一次的几家
     private var running: Set<ProviderID> = []
     private var again: Set<ProviderID> = []
@@ -146,16 +147,19 @@ final class UsageStore: ObservableObject {
         return ids
     }
 
-    /// 文件事件会连着来一串，合并成一次刷新
+    /// 文件事件会连着来一串，合并成一次刷新。同一家离上一次文件触发的重算不到 5 秒时等到点再算（RefreshThrottle）。
+    /// 已经在等的那家不用再排：开始算时读的是那时候的文件，这期间的变化都算得到；开始算以后又变了的，会按限频再排一次
     func scheduleRefresh(_ ids: Set<ProviderID>, after delay: TimeInterval = 0.8) {
-        debounced.formUnion(ids)
-        debounce?.cancel()
-        debounce = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled, let self else { return }
-            let ids = debounced
-            debounced = []
-            refresh(ids)
+        let now = Date()
+        for id in ids where pendingEvents[id] == nil {
+            let wait = throttle.delay(for: id, now: now, debounce: delay)
+            pendingEvents[id] = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                guard let self else { return }
+                pendingEvents[id] = nil
+                throttle.started(id, at: Date())
+                refresh([id])
+            }
         }
     }
 

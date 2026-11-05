@@ -659,6 +659,19 @@ do {  // 第一次扫描（刚启动）也要读到「现在 − 24 小时」之
     try? FileManager.default.removeItem(at: home)
 }
 
+// MARK: - 文件事件的刷新限频
+
+do {
+    var throttle = RefreshThrottle(minInterval: 5)
+    let t0 = at(20, 12)
+    check(near(throttle.delay(for: .claude, now: t0, debounce: 0.8), 0.8), "第一次文件变化：等防抖的 0.8 秒就算")
+    throttle.started(.claude, at: t0)
+    check(near(throttle.delay(for: .claude, now: t0 + 1, debounce: 0.8), 4), "上次开始算才过 1 秒：等到满 5 秒")
+    check(near(throttle.delay(for: .claude, now: t0 + 4.5, debounce: 0.8), 0.8), "快满 5 秒了：至少还是等防抖的 0.8 秒")
+    check(near(throttle.delay(for: .codex, now: t0 + 1, debounce: 0.8), 0.8), "每家分开算：Claude 刚算过不影响 Codex")
+    check(near(throttle.delay(for: .claude, now: t0 + 30, debounce: 0.8), 0.8), "隔了很久：不用多等")
+}
+
 // MARK: - 几家一起显示
 
 do {
@@ -865,7 +878,13 @@ do {
                                                         type: "seven_day"), org: nil, now: now)
     check(near(rejectedWeek?.weekly, 100) && near(rejectedWeek?.session, 40), "被拒绝的是每周额度：只有每周算 100")
     check(near(ClaudeCLIReadings.parse(event(#"{"unifiedWindows":{"five_hour":{"utilization":37,"resetsAt":\#(epoch(fiveReset))}}}"#),
-                                       org: nil, now: now)?.session, 37), "大于 1 的当成已经是百分比")
+                                       org: nil, now: now)?.session, 37), "明显是百分比的数（大于 2）不再乘 100")
+    // 超额时比例可能略大于 1：还是比例，算用完；不能当成已经是百分比、变成 1%
+    let over = ClaudeCLIReadings.parse(unified(five: 1.05, sevenDay: 0.6, fiveReset: fiveReset, weekReset: weekReset), org: nil, now: now)
+    check(near(over?.session, 100) && near(over?.weekly, 60), "超额的 1.05 算用完：\(String(describing: over))")
+    // 同一条里有明显是百分比的数：整条都已经是百分比（命令行改了格式），小的数也不乘 100
+    let percents = ClaudeCLIReadings.parse(unified(five: 1.5, sevenDay: 40, fiveReset: fiveReset, weekReset: weekReset), org: nil, now: now)
+    check(near(percents?.session, 1.5) && near(percents?.weekly, 40), "整条是百分比：\(String(describing: percents))")
 
     // 认不出来的退回估算，不抛错
     check(ClaudeCLIReadings.parse("", org: nil, now: now) == nil, "空输出")
