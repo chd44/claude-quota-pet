@@ -15,7 +15,7 @@
 """
 import importlib.util, json, os, sys
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("export_painted", os.path.join(HERE, "export_painted.py"))

@@ -6,7 +6,7 @@
 
 **简体中文** · [English](README.en.md)
 
-[![CI](https://github.com/caihaodong44chd-gif/claude-quota-pet/actions/workflows/ci.yml/badge.svg)](https://github.com/caihaodong44chd-gif/claude-quota-pet/actions/workflows/ci.yml)
+[![CI](https://github.com/chd44/claude-quota-pet/actions/workflows/ci.yml/badge.svg)](https://github.com/chd44/claude-quota-pet/actions/workflows/ci.yml)
 
 **住在 macOS 菜单栏里的二次元小人，实时显示你的 Claude 订阅额度，也能一起看 Codex 的。**<br>
 额度越紧张她越累，用完了就睡着，还会告诉你多久后恢复。
@@ -115,7 +115,7 @@
 
 ### 直接下载
 
-1. 在 [Releases](https://github.com/caihaodong44chd-gif/claude-quota-pet/releases/latest) 下载 `QuotaPet-版本号.zip`，解压后把「额度宠物」拖进「应用程序」文件夹。
+1. 在 [Releases](https://github.com/chd44/claude-quota-pet/releases/latest) 下载 `QuotaPet-版本号.zip`，解压后把「额度宠物」拖进「应用程序」文件夹。
 2. 双击打开。QuotaPet 没有花钱买苹果的开发者签名，第一次打开 macOS 会拦下来，说无法验证开发者：点「完成」，到「系统设置 → 隐私与安全性」拉到最下面，点「仍要打开」。只需要这一次。
    也可以在终端里执行 `xattr -dr com.apple.quarantine /Applications/QuotaPet.app` 解除拦截。
 3. 第一次打开时宠物会出现在菜单栏，并弹出面板说明读到了哪些数据；放在「应用程序」文件夹里的话，会顺便打开开机自启。
@@ -125,7 +125,7 @@
 装命令行工具（`xcode-select --install`）就够，不需要 Xcode。
 
 ```bash
-git clone https://github.com/caihaodong44chd-gif/claude-quota-pet.git
+git clone https://github.com/chd44/claude-quota-pet.git
 cd claude-quota-pet/QuotaPet
 make install    # 编译，装到 ~/Applications，并打开开机自启
 ```
@@ -191,7 +191,7 @@ docs/PRODUCT_PLAN.md  产品规划和实测记录
 
 ## 反馈
 
-用完感觉怎么样、有没有遇到问题，欢迎[提个 issue](https://github.com/caihaodong44chd-gif/claude-quota-pet/issues/new?template=feedback.yml)。
+用完感觉怎么样、有没有遇到问题，欢迎[提个 issue](https://github.com/chd44/claude-quota-pet/issues/new?template=feedback.yml)。
 
 ## 许可证
 

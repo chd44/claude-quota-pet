@@ -6,7 +6,7 @@
 
 [简体中文](README.md) · **English**
 
-[![CI](https://github.com/caihaodong44chd-gif/claude-quota-pet/actions/workflows/ci.yml/badge.svg)](https://github.com/caihaodong44chd-gif/claude-quota-pet/actions/workflows/ci.yml)
+[![CI](https://github.com/chd44/claude-quota-pet/actions/workflows/ci.yml/badge.svg)](https://github.com/chd44/claude-quota-pet/actions/workflows/ci.yml)
 
 **An anime-style pet that lives in your macOS menu bar and shows your Claude subscription usage in real time, with Codex alongside if you use it.**<br>
 The tighter your quota gets, the more tired she looks. When it runs out she falls asleep and tells you when it comes back.
@@ -115,7 +115,7 @@ Requires macOS 14 or later, on Apple silicon or Intel.
 
 ### Download
 
-1. Download `QuotaPet-<version>.zip` from [Releases](https://github.com/caihaodong44chd-gif/claude-quota-pet/releases/latest), unzip it and drag QuotaPet into your Applications folder.
+1. Download `QuotaPet-<version>.zip` from [Releases](https://github.com/chd44/claude-quota-pet/releases/latest), unzip it and drag QuotaPet into your Applications folder.
 2. Double-click to open. QuotaPet isn't signed with a paid Apple Developer ID, so the first time macOS blocks it because it can't verify the developer: click Done, go to System Settings → Privacy & Security, scroll to the bottom and click Open Anyway. You only need to do this once.
    Or run `xattr -dr com.apple.quarantine /Applications/QuotaPet.app` in Terminal.
 3. On first launch the pet appears in the menu bar and opens its popover to show what data it found. If it's in the Applications folder, launch at login is turned on too.
@@ -125,7 +125,7 @@ Requires macOS 14 or later, on Apple silicon or Intel.
 The Command Line Tools (`xcode-select --install`) are enough; you don't need Xcode.
 
 ```bash
-git clone https://github.com/caihaodong44chd-gif/claude-quota-pet.git
+git clone https://github.com/chd44/claude-quota-pet.git
 cd claude-quota-pet/QuotaPet
 make install    # build, install to ~/Applications and turn on launch at login
 ```
@@ -219,7 +219,7 @@ Code structure, adding support for other AI tools, and redrawing the pet are cov
 
 ## Feedback
 
-Used it? Like it, hate it, hit a bug — [open an issue](https://github.com/caihaodong44chd-gif/claude-quota-pet/issues/new?template=feedback.yml).
+Used it? Like it, hate it, hit a bug — [open an issue](https://github.com/chd44/claude-quota-pet/issues/new?template=feedback.yml).
 
 ## License
 
