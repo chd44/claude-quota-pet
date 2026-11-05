@@ -280,7 +280,10 @@ public final class ClaudeProvider: UsageProvider, @unchecked Sendable {
             let from = max(now.addingTimeInterval(-lookback), current?.start ?? .distantPast)
             let otherPerHour = OtherUsage.burnPerHour(other, from: from, now: now, minSpan: lookback / 3)
             otherBurn = otherPerHour
-            burn = added(after: from) * 3600 / max(now.timeIntervalSince(from), lookback / 3) + otherPerHour
+            // 回看被窗口开始截断时，开启窗口的那个请求（时间正好是窗口开始）也要算进去，和百分比一样（including）。
+            // 不然窗口开始后的半小时里速度只算后面的请求，刚开工就猛用时「烧得快」「快用完」来得太晚
+            burn = added(after: from, including: from == current?.start) * 3600 / max(now.timeIntervalSince(from), lookback / 3)
+                + otherPerHour
         }
 
         return UsageWindow(id: id, title: title, duration: duration, percent: percent,

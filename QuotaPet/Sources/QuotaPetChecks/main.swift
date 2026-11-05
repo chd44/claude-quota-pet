@@ -47,6 +47,9 @@ check(Fmt.clock(at(30, 17, 45), now: at(25, 12)) == "周三 17:45", "clock 一�
 check(Fmt.ago(at(25, 11, 45), now: at(25, 12)) == "15 分钟前", "ago")
 check(Fmt.fromNow(2 * hour + 14 * 60) == "约 2 小时 14 分后", "fromNow")
 check(Fmt.fromNow(30) == "不到 1 分钟后", "fromNow 不到 1 分钟时不说「约」")
+check(Fmt.percent(27.4) == "27%" && Fmt.percent(27.5) == "28%", "percent 四舍五入")
+check(Fmt.percent(99.6) == "99%" && Fmt.percent(99.99) == "99%", "还没到 100 的不显示成 100%：\(Fmt.percent(99.6))")
+check(Fmt.percent(100) == "100%" && Fmt.percent(103) == "103%", "真用完了才是 100%")
 
 // MARK: - 宠物
 
@@ -349,6 +352,13 @@ do {
                                    requests: reqs, scale: 1, percentOf: percentOf, resetAnchor: nil, live: false, now: at(25, 23, 40))
     check(near(off.percent, 20), "关掉实时估算时只显示官方读数")
 
+    // 窗口 23:20 才开始（回看的半小时被窗口开始截断）：开启窗口的那个 5% 也算进速度，(5 + 3)% ÷ 20 分钟 = 每小时 24%
+    let opening = provider.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: [],
+                                       requests: [opus(at(25, 23, 20), usd: 0.117 * 5), opus(at(25, 23, 30), usd: 0.117 * 3)],
+                                       scale: 1, percentOf: percentOf, resetAnchor: nil, live: true, now: at(25, 23, 40))
+    check(opening.startedAt == at(25, 23, 20) && near(opening.percent, 8, 1e-3) && near(opening.burnPerHour, 24, 1e-3),
+          "开启窗口的请求也算进消耗速度：\(opening.percent) \(opening.burnPerHour ?? -1)")
+
     let heavy = [opus(at(25, 23, 30), usd: 0.117 * 90)]  // 20% + 90% 会冲过 100%
     let capped = provider.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: series,
                                       requests: heavy, scale: 1, percentOf: percentOf, resetAnchor: nil, live: true, now: at(25, 23, 40))
@@ -505,8 +515,9 @@ do {
     }
     let zero = [S(time: at(20, 9, 30), value: 0)]  // 窗口开始前读数确实是 0
     let w = window(zero + [S(time: at(20, 10, 10), value: 10), S(time: at(20, 10, 25), value: 16)])
-    check(near(w.otherPercent, 13) && near(w.otherBurnPerHour, 26, 1e-6) && near(w.burnPerHour, 26, 1e-6),
-          "从 0 算起：10:10 本机 3、官方 10，多 7；10:25 本机没有请求，+6；速度 13 ÷ 30 分钟：\(w.otherPercent) \(w.burnPerHour ?? -1)")
+    // 总速度 = 本机（开启窗口的那个 3%）+ 其他端 13，正好是官方从 0 涨到 16 的速度
+    check(near(w.otherPercent, 13) && near(w.otherBurnPerHour, 26, 1e-6) && near(w.burnPerHour, 32, 1e-6),
+          "从 0 算起：10:10 本机 3、官方 10，多 7；10:25 本机没有请求，+6；速度 (3 + 13) ÷ 30 分钟：\(w.otherPercent) \(w.burnPerHour ?? -1)")
     let midway = window([S(time: at(20, 10, 10), value: 40), S(time: at(20, 10, 25), value: 46)])
     check(near(midway.otherPercent, 6), "开始前没有 0 的读数（记录从窗口中间开始）：第一次读数之前的 40% 不算其他端：\(midway.otherPercent)")
     check(window(zero + Array(readings.prefix(2)), live: false).otherPercent == 0, "关掉实时估算时也不算其他端")
