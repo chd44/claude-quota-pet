@@ -21,10 +21,11 @@ if ! noreply; then
   if [ -n "$who" ] && [ "$id" != "$who" ] && [ -n "$login" ]; then
     git config user.name "$login"
     git config user.email "$id+$login@users.noreply.github.com"
-  elif git remote get-url origin 2>/dev/null | grep -q 'caihaodong44chd-gif/claude-quota-pet'; then
-    # gh 用不了时，主人自己的仓库直接用主人的地址
-    git config user.name caihaodong44chd-gif
-    git config user.email 327893803+caihaodong44chd-gif@users.noreply.github.com
+  elif git remote get-url origin 2>/dev/null | grep -qE '(chd44|caihaodong44chd-gif)/claude-quota-pet'; then
+    # gh 用不了时，主人自己的仓库直接用主人的地址。用户名从 caihaodong44chd-gif 改成了 chd44（账号 ID 不变），
+    # 旧名字的地址 GitHub 还会跳转，两种都认
+    git config user.name chd44
+    git config user.email 327893803+chd44@users.noreply.github.com
   fi
 fi
 
