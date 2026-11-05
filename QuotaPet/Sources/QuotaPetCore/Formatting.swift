@@ -73,7 +73,12 @@ public enum Fmt {
         return tr("\(days) 天前", "\(plural(days, "day")) ago")
     }
 
-    public static func percent(_ v: Double) -> String { "\(Int(v.rounded()))%" }
+    /// 四舍五入到整数，但还没到 100 的最多显示 99%：「100%」只留给真用完了的（官方读数、限流消息），
+    /// 不然 Codex 的 99.6% 这种读数会显示成 100%，菜单栏却没有恢复倒计时、宠物也没睡
+    public static func percent(_ v: Double) -> String {
+        let n = Int(v.rounded())
+        return "\(v < 100 ? min(n, 99) : n)%"
+    }
 
     public static func usd(_ v: Double) -> String { String(format: "$%.2f", v) }
 
