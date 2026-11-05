@@ -39,15 +39,15 @@ public enum ClaudeCLIReadings {
     // MARK: - 解析
 
     /// 从 `claude -p … --output-format stream-json --verbose` 的输出里取额度读数。
-    /// 输出里有 `rate_limit_event`：`rate_limit_info.unifiedWindows.five_hour / seven_day` 各有 `utilization`（0–1）和
-    /// `resetsAt`（秒级时间戳）；快到限额时的老格式只有 `rateLimitType` + `utilization`。
+    /// 输出里有 `rate_limit_event`：`rate_limit_info.unifiedWindows.five_hour / seven_day` 各有 `utilization`（0–1，
+    /// 超额时可能略大于 1）和 `resetsAt`（秒级时间戳）；快到限额时的老格式只有 `rateLimitType` + `utilization`。
     /// 一行行解析、不认识的行跳过（命令行更新后字段可能变，认不出就是 nil，调用方退回估算）。
     public static func parse(_ output: String, org: String?, now: Date) -> CLIReading? {
         var reading = CLIReading(time: now, org: org)
         var found = false
 
-        func apply(window id: String, utilization: Any?, resetsAt: Any?, rejected: Bool) {
-            var percent = percentValue(utilization)
+        func apply(window id: String, utilization: Any?, resetsAt: Any?, rejected: Bool, percentFormat: Bool) {
+            var percent = percentValue(utilization, percentFormat: percentFormat)
             if rejected { percent = 100 }  // 被拒绝就是这个窗口用完了
             let reset = dateValue(resetsAt, now: now, window: id)
             guard percent != nil || reset != nil else { return }
@@ -72,25 +72,39 @@ public enum ClaudeCLIReadings {
             let rejected = info["status"] as? String == "rejected"
             let type = info["rateLimitType"] as? String
             if let windows = info["unifiedWindows"] as? [String: Any] {
-                for (id, value) in windows {
-                    guard let window = value as? [String: Any] else { continue }
-                    apply(window: id, utilization: window["utilization"], resetsAt: window["resetsAt"],
-                          rejected: rejected && id == type)
+                let entries: [(id: String, window: [String: Any])] = windows.compactMap { element in
+                    (element.value as? [String: Any]).map { (id: element.key, window: $0) }
+                }
+                let percentFormat = entries.contains { looksLikePercent($0.window["utilization"]) }
+                for entry in entries {
+                    apply(window: entry.id, utilization: entry.window["utilization"], resetsAt: entry.window["resetsAt"],
+                          rejected: rejected && entry.id == type, percentFormat: percentFormat)
                 }
             } else if let type {
-                apply(window: type, utilization: info["utilization"], resetsAt: info["resetsAt"], rejected: rejected)
+                apply(window: type, utilization: info["utilization"], resetsAt: info["resetsAt"], rejected: rejected,
+                      percentFormat: looksLikePercent(info["utilization"]))
             }
         }
         return found ? reading : nil
     }
 
-    /// 0–1 的小数（官方格式）换成百分比；大于 1 的当成已经是百分比。保留一位小数，去掉浮点误差
-    static func percentValue(_ value: Any?) -> Double? {
-        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-        let v = number.doubleValue
-        guard v.isFinite, v >= 0 else { return nil }
-        let percent = v > 1 ? v : v * 100
+    /// utilization 换成百分比，保留一位小数，去掉浮点误差。官方格式是 0–1 的比例；超额时可能略大于 1，照样乘 100、封顶 100（算用完），
+    /// 不能当成已经是百分比，不然 1.05 会变成 1%。percentFormat：同一条读数里有明显是百分比的数（见 looksLikePercent），
+    /// 说明命令行改成了直接给百分比，这时不乘 100
+    static func percentValue(_ value: Any?, percentFormat: Bool = false) -> Double? {
+        guard let v = number(value), v >= 0 else { return nil }
+        let percent = percentFormat ? v : v * 100
         return (min(percent, 100) * 10).rounded() / 10
+    }
+
+    /// 比例再超额也到不了 2 倍，大于 2 的只能是已经换成百分比的数
+    static func looksLikePercent(_ value: Any?) -> Bool { (number(value) ?? 0) > 2 }
+
+    /// 数字字段（布尔值不算），不是有限的数时是 nil
+    private static func number(_ value: Any?) -> Double? {
+        guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+        let v = n.doubleValue
+        return v.isFinite ? v : nil
     }
 
     /// 秒级时间戳（毫秒的也认）；不在这个窗口说得通的范围里（格式变了）就不用
