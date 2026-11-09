@@ -980,6 +980,20 @@ do {
     check(P.shouldProbeManually(now: now, lastAttempt: nil) && !P.shouldProbeManually(now: now, lastAttempt: now.addingTimeInterval(-10))
           && P.shouldProbeManually(now: now, lastAttempt: now.addingTimeInterval(-40)), "手动刷新只防连点")
 
+    // 桌面端读数停了时面板怎么说：命令行没登录、找不到时，不能还说「会补查」
+    typealias H = StalledOfficialHint
+    check(H.of(cliProbe: false, status: nil, claudeRunning: true) == .refreshDesktop
+          && H.of(cliProbe: false, status: .notLoggedIn, claudeRunning: false) == .openDesktop, "没开命令行补查：按桌面端开没开说")
+    check(H.of(cliProbe: true, status: nil, claudeRunning: true) == .cliFillsIn
+          && H.of(cliProbe: true, status: .idle, claudeRunning: false) == .cliFillsIn
+          && H.of(cliProbe: true, status: .ok(at: at(20, 12)), claudeRunning: true) == .cliFillsIn, "命令行能用：说会补查")
+    check(H.of(cliProbe: true, status: .notLoggedIn, claudeRunning: true) == .cliNeedsLogin
+          && H.of(cliProbe: true, status: .wrongAccount, claudeRunning: true) == .cliNeedsLogin, "命令行没登录或账号不对：说补查不了")
+    check(H.of(cliProbe: true, status: .notFound, claudeRunning: true) == .cliNotFound
+          && H.of(cliProbe: true, status: .failed(at: at(20, 12)), claudeRunning: true) == .cliRetrying, "找不到命令行、上次没成功各有说法")
+    check(![H.cliFillsIn, .cliRetrying, .cliNeedsLogin, .cliNotFound, .refreshDesktop, .openDesktop].contains(where: { $0.text.isEmpty }),
+          "每种说法都有字")
+
     // 接进 ClaudeProvider：命令行的读数当官方读数用，官方给的重置时间当窗口的开始和结束
     /// 返回提供者本身时（provider），可以用同一个再算一次
     func makeProvider(cli readings: [CLIReading], desktop: [PlanUsageSample], now: Date,
@@ -1552,6 +1566,7 @@ do {
     english += [CodexProvider.missingNote, CodexProvider.staleNote(readAt: Date(timeIntervalSinceNow: -5 * 3600), now: Date()), UsageWindow.title(minutes: 43200), UsageWindow.title(minutes: 120)]
     english += [ClaudeCLIProbeStatus.idle, .querying, .ok(at: at(20, 12)), .failed(at: at(20, 12)), .notFound, .notLoggedIn, .wrongAccount]
         .map { $0.text(now: at(20, 13)) }
+    english += [StalledOfficialHint.cliFillsIn, .cliRetrying, .cliNeedsLogin, .cliNotFound, .refreshDesktop, .openDesktop].map(\.text)
     english += [ClaudeDesktopHistory.ParseError.unexpectedFormat.localizedDescription,
                 Fmt.clock(at(24, 9), now: at(25, 12)), Fmt.duration(30)]
     let alertWindow = UsageWindow(id: "five_hour", title: UsageWindow.sessionTitle, duration: fiveHours, percent: 85,

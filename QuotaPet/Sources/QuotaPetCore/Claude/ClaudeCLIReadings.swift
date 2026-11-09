@@ -354,3 +354,54 @@ public enum ClaudeCLIProbeStatus: Equatable, Sendable {
     /// 要不要给出登录命令
     public var needsLogin: Bool { self == .notLoggedIn || self == .wrongAccount }
 }
+
+/// 桌面端的官方读数停了（超过 ClaudeProvider.staleAfter 没来）时，面板底部那句话怎么说。
+/// 新版桌面端只在你最近点开过它的菜单栏图标之后才后台刷新额度（日志里是「background poll paused: tray not opened recently」，
+/// 约 24 小时），不点开就一直停着。命令行补查是备用办法，但命令行没登录、找不到的时候它什么也查不到，不能还说「会补查」
+public enum StalledOfficialHint: Equatable, Sendable {
+    /// 命令行会在你用 Claude Code 时补查
+    case cliFillsIn
+    /// 命令行上次补查没成功，会自动重试
+    case cliRetrying
+    /// 命令行没登录或账号不对：补查不了
+    case cliNeedsLogin
+    /// 没找到命令行：补查不了
+    case cliNotFound
+    /// 桌面端开着：右键点一下它的菜单栏图标就恢复
+    case refreshDesktop
+    /// 桌面端没开
+    case openDesktop
+
+    public static func of(cliProbe: Bool, status: ClaudeCLIProbeStatus?, claudeRunning: Bool) -> StalledOfficialHint {
+        guard cliProbe else { return claudeRunning ? .refreshDesktop : .openDesktop }
+        switch status {
+        case .notLoggedIn, .wrongAccount: return .cliNeedsLogin
+        case .notFound: return .cliNotFound
+        case .failed: return .cliRetrying
+        case .idle, .querying, .ok, .none: return .cliFillsIn
+        }
+    }
+
+    public var text: String {
+        switch self {
+        case .cliFillsIn:
+            return tr("桌面端的官方读数停了：你在用 Claude Code 时，会用 Claude 命令行补查（聊天、网页、手机的用量靠它）",
+                      "The desktop app's official readings have stopped: while you use Claude Code, the Claude command line fills them in (chat, web and mobile usage comes from it)")
+        case .cliRetrying:
+            return tr("桌面端的官方读数停了，命令行上次补查也没成功，会自动重试",
+                      "The desktop app's official readings have stopped and the last command-line check didn't work; it will retry automatically")
+        case .cliNeedsLogin:
+            return tr("桌面端的官方读数停了，命令行又没登录，补查不了：到设置里复制登录命令，或在 Claude 桌面端右键点一下它的菜单栏图标",
+                      "The desktop app's official readings have stopped and the command line isn't signed in, so it can't fill them in: copy the sign-in command in Settings, or right-click Claude's menu bar icon")
+        case .cliNotFound:
+            return tr("桌面端的官方读数停了，也没找到 Claude 命令行：在 Claude 桌面端右键点一下它的菜单栏图标，读数就会恢复",
+                      "The desktop app's official readings have stopped and the Claude command line wasn't found: right-click Claude's menu bar icon to get them going again")
+        case .refreshDesktop:
+            return tr("桌面端的官方读数停了（它只在你最近点开过菜单栏图标后才后台刷新）：右键点一下 Claude 的菜单栏图标，读数就会恢复",
+                      "The desktop app's official readings have stopped (it only refreshes in the background after you've recently used its menu bar icon): right-click Claude's menu bar icon to get them going again")
+        case .openDesktop:
+            return tr("打开 Claude 桌面端才会更新官方读数（聊天、网页、手机的用量要靠它）",
+                      "Open the Claude desktop app to update the official reading (chat, web and mobile usage comes from it)")
+        }
+    }
+}

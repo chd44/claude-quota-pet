@@ -76,6 +76,7 @@ struct PopoverRoot: View {
                     onQuit: onQuit,
                     claudeRunning: state.claudeRunning,
                     cliProbe: settings.claudeCLIProbe,
+                    cliProbeStatus: store.cliProbeStatus,
                     said: OverviewView<LivePet>.Said(situation: status.situation, pick: state.chat.pick),
                     onSay: state.said,
                     onPoke: {

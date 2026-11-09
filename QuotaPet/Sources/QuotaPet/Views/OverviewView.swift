@@ -22,6 +22,8 @@ struct OverviewView<Pet: View>: View {
     var claudeRunning = true
     /// 打开了「用命令行补官方读数」：桌面端停了读数时，说明里不再只让用户去开桌面端
     var cliProbe = false
+    /// 命令行补查现在的状态：没登录、找不到时，说明里不能还说「会补查」
+    var cliProbeStatus: ClaudeCLIProbeStatus?
     /// 这句话是哪种情况、第几句。变了（换了情况、面板又打开了一次）就通过 onSay 告诉外面：「这么晚还在忙」一晚只说一次要靠它记
     struct Said: Equatable {
         var situation: PetTalk.Situation
@@ -172,14 +174,7 @@ struct OverviewView<Pet: View>: View {
                 : tr("暂无官方读数，数值全部是本机估算", "No official reading yet, so all numbers are local estimates")
         }
         guard let next = nextOfficialText(now: now) else {
-            if cliProbe {
-                return tr("桌面端的官方读数停了：你在用 Claude Code 时，会用 Claude 命令行补查（聊天、网页、手机的用量靠它）",
-                          "The desktop app's official readings have stopped: while you use Claude Code, the Claude command line fills them in (chat, web and mobile usage comes from it)")
-            }
-            return claudeRunning
-                ? tr("聊天、网页、手机的用量要等下一次官方读数", "Chat, web and mobile usage shows up with the next official reading")
-                : tr("打开 Claude 桌面端才会更新官方读数（聊天、网页、手机的用量要靠它）",
-                     "Open the Claude desktop app to update the official reading (chat, web and mobile usage comes from it)")
+            return StalledOfficialHint.of(cliProbe: cliProbe, status: cliProbeStatus, claudeRunning: claudeRunning).text
         }
         return tr("聊天、网页、手机的用量要等官方读数（每 15 分钟一次），\(next)",
                   "Chat, web and mobile usage shows up with the official reading (every 15 min); \(next)")

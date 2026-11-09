@@ -52,6 +52,7 @@ make release    # Apple 芯片 + Intel 通用版 zip（build/QuotaPet-<版本>.z
   - 官方读数要属于当前窗口才用：在最近一次重置之后，也不比一个窗口还旧。隔了一个窗口以上还不是 0 的读数（比如 5 小时额度隔夜 50 → 30）算新窗口里的使用，不当成上一个窗口的。
   - 命令行读数（可选，默认关闭）：`CLIProbe`（App 里）让官方命令行发一个最小请求，`ClaudeCLIReadings.parse` 从 stream-json 输出的 `rate_limit_event` 里取 `unifiedWindows` 的 `utilization`（0–1 小数；超额时可能略大于 1，照样乘 100、封顶算用完。同一条里有大于 2 的数才当成命令行改成了直接给百分比，见 `looksLikePercent`）和 `resetsAt`（秒），存进 `cli-readings.jsonl`（`CLIReadingArchive`，留 8 天，和 `intervals.jsonl` 在一起）。`ClaudeProvider` 把它们和桌面端读数合并（`ClaudeCLIReadings.merge`：组织以桌面端最近一次为准，对不上的不用），所以换算率学习、其他端用量、窗口推算都不用管读数从哪来。官方给的 `resetsAt` 比手动指定的和推算的优先（`buildWindow` 的 `officialReset`；限流中仍以限流消息为准）：每周窗口按它每 7 天往后推，5 小时窗口只有还没到的才算当前窗口的结束，已经过了的当成一次精确重置（进 `knownResets`），不往后接着排一个 5 小时。
   - 什么时候查在 `ClaudeCLIProbePolicy`（Core，进自检）：5 小时窗口已经在跑、官方读数之后有本机用量、官方读数超过 17 分钟没来，才自动查；失败按倍数退避、最多 2 小时。**不在用的时候不查**：窗口从第一次请求才开始计时，空闲时查会让它提前开始。手动刷新、刚打开开关会立刻查一次。只认 `authMethod == claude.ai` 的订阅登录，进程环境里的 API Key 和第三方云开关会去掉。
+  - 桌面端的官方读数会停：新版桌面端只在用户最近右键点过它的菜单栏图标之后才后台刷新额度（它的日志里是 `background poll paused: tray not opened recently`，约 24 小时），之后 `plan-usage-history.json` 就不再变。面板底部那句话由 `StalledOfficialHint`（Core，进自检）按命令行补查的状态挑：命令行没登录、找不到时不能再说「会补查」，要说补查不了、怎么办。桌面端自带命令行的登录会丢，`auth status` 看到 `loggedIn: false` 就是这样。
   - Claude Code 被限流时会在日志里写一条 synthetic 消息，带 `quotaLimits`（`rateLimitType`、秒级 `resetsAt`）。扫描器把它记成 `ClaudeLimitEvent`：没到恢复时间前这个窗口直接算用完，重置时间以它为准。
   - 其他端（网页、手机、桌面端聊天）用量由 `OtherUsage` 算：相邻两次官方读数之间，官方增量比本机估算多出门槛以上的部分。`RateLearner` 学换算率时也用同一个门槛，跳过这种混用的区间。
   - **不变量**：官方读数没到 100 时，估算值最多 99%。只有官方读数或限流消息能宣布「用完了」，免得宠物误睡、误发提醒。
