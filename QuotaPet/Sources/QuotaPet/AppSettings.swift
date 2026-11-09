@@ -52,7 +52,7 @@ final class AppSettings: ObservableObject {
     @Published var autoLearn: Bool {
         didSet { defaults.set(autoLearn, forKey: Keys.autoLearn) }
     }
-    /// 用 Claude 官方命令行补官方读数（联网：命令行发一个最小请求）。默认关闭，见 CLIProbe
+    /// 用 Claude 官方命令行补官方读数（联网：命令行发一个最小请求）。默认开启（设置里可关），见 CLIProbe
     @Published var claudeCLIProbe: Bool {
         didSet { defaults.set(claudeCLIProbe, forKey: Keys.claudeCLIProbe) }
     }
@@ -102,7 +102,7 @@ final class AppSettings: ObservableObject {
         liveEstimate = defaults.bool(forKey: Keys.liveEstimate)
         autoLearn = defaults.bool(forKey: Keys.autoLearn)
         weeklyResetAnchor = defaults.object(forKey: Keys.weeklyResetAnchor) as? Date
-        claudeCLIProbe = defaults.bool(forKey: Keys.claudeCLIProbe)
+        claudeCLIProbe = defaults.object(forKey: Keys.claudeCLIProbe) as? Bool ?? true
         language = Language(rawValue: defaults.string(forKey: Keys.language) ?? "")
         L10n.language = language ?? .preferred()  // init 里不会触发 willSet
     }

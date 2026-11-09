@@ -1,7 +1,8 @@
+import AppKit
 import Foundation
 import QuotaPetCore
 
-/// 用 Claude 官方命令行补官方读数（设置 → Claude → 官方读数，默认关闭）。
+/// 用 Claude 官方命令行补官方读数（设置 → Claude → 官方读数，默认开启、可关）。
 ///
 /// 打开后，QuotaPet 在「你正在用、官方读数又旧了」时让命令行发一个最小请求（haiku、一个字、不带工具、不存会话），
 /// 从响应里的 `rate_limit_event` 取 5 小时和每周额度的已用百分比和重置时间，存进 cli-readings.jsonl（见 ClaudeCLIReadings）。
@@ -59,26 +60,73 @@ final class CLIProbe {
         run(now: now)
     }
 
-    private func run(now: Date) {
+    /// quiet：等登录时反复看一眼，设置页上不闪「正在查询」，没登录也不算失败（不拉长之后的退避）
+    private func run(now: Date, quiet: Bool = false) {
         running = true
         lastAttempt = now
-        status = .querying
+        if !quiet { status = .querying }
         let archive = archive, expectedOrg = desktopOrg()
         Task.detached(priority: .utility) { [weak self] in
             let outcome = CLIProbeRunner.run(archive: archive, expectedOrg: expectedOrg)
-            await self?.finish(outcome)
+            await self?.finish(outcome, quiet: quiet)
         }
     }
 
-    private func finish(_ outcome: ClaudeCLIProbeStatus) {
+    private func finish(_ outcome: ClaudeCLIProbeStatus, quiet: Bool = false) {
         running = false
         status = outcome
         switch outcome {
         case .ok:
             failures = 0
             onReading?()
+        case .notLoggedIn where quiet:
+            break
         default:
             failures += 1
+        }
+        if loginAfterCheck {
+            loginAfterCheck = false
+            if outcome.needsLogin { beginLogin(logoutFirst: outcome == .wrongAccount) }
+        }
+    }
+
+    // MARK: - 一键登录
+
+    /// 设置页上的「开启并登录」：先打开开关查一次，结果是没登录（或账号不对）才弹终端，已经登录了就不打扰
+    private var loginAfterCheck = false
+    private var loginWatch: Task<Void, Never>?
+
+    func connect() {
+        if settings.claudeCLIProbe {
+            if status.needsLogin { beginLogin(logoutFirst: status == .wrongAccount) }
+        } else {
+            loginAfterCheck = true
+            settings.claudeCLIProbe = true  // settingChanged 随后会查一次，finish 里接着往下走
+        }
+    }
+
+    /// 在终端里打开官方命令行的 auth login（脚本见 ClaudeCLI.loginScript）：登录在浏览器里由用户自己完成。
+    /// 之后每隔几秒看一眼登录好了没有，最多等 10 分钟
+    func beginLogin(logoutFirst: Bool) {
+        guard let binary else { return }
+        let script = FileManager.default.temporaryDirectory.appendingPathComponent("QuotaPet-claude-login.command")
+        do {
+            try ClaudeCLI.loginScript(binary, logoutFirst: logoutFirst).write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        } catch { return }
+        if let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") {
+            NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
+        } else {
+            NSWorkspace.shared.open(script)
+        }
+        loginWatch?.cancel()
+        loginWatch = Task { [weak self] in
+            for _ in 0..<75 {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                guard self.settings.claudeCLIProbe, self.status.needsLogin else { return }
+                if !self.running { self.run(now: Date(), quiet: true) }
+            }
         }
     }
 }

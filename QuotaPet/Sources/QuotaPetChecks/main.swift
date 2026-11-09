@@ -980,6 +980,15 @@ do {
     check(P.shouldProbeManually(now: now, lastAttempt: nil) && !P.shouldProbeManually(now: now, lastAttempt: now.addingTimeInterval(-10))
           && P.shouldProbeManually(now: now, lastAttempt: now.addingTimeInterval(-40)), "手动刷新只防连点")
 
+    let scriptBin = URL(fileURLWithPath: "/a b/it's/claude")
+    let loginOnly = ClaudeCLI.loginScript(scriptBin, logoutFirst: false)
+    let relogin = ClaudeCLI.loginScript(scriptBin, logoutFirst: true)
+    let quotedBin = "'/a b/it'\\''s/claude'"
+    check(loginOnly.hasPrefix("#!/bin/zsh\n") && loginOnly.contains("\n" + quotedBin + " auth login\n") && !loginOnly.contains("auth logout"),
+          "登录脚本只登录，路径加引号")
+    check(relogin.contains(quotedBin + " auth logout\n" + quotedBin + " auth login"), "账号不对：先退出再登录")
+    check(!loginOnly.contains("\"\"") && loginOnly.filter({ $0 == "\"" }).count == 4, "脚本里的提示文字用双引号包好，文字里不能再有双引号")
+
     // 桌面端读数停了时面板怎么说：命令行没登录、找不到时，不能还说「会补查」
     typealias H = StalledOfficialHint
     check(H.of(cliProbe: false, status: nil, claudeRunning: true) == .refreshDesktop
@@ -1566,6 +1575,7 @@ do {
     english += [CodexProvider.missingNote, CodexProvider.staleNote(readAt: Date(timeIntervalSinceNow: -5 * 3600), now: Date()), UsageWindow.title(minutes: 43200), UsageWindow.title(minutes: 120)]
     english += [ClaudeCLIProbeStatus.idle, .querying, .ok(at: at(20, 12)), .failed(at: at(20, 12)), .notFound, .notLoggedIn, .wrongAccount]
         .map { $0.text(now: at(20, 13)) }
+    english += [ClaudeCLI.loginScript(URL(fileURLWithPath: "/a/claude"), logoutFirst: true)]
     english += [StalledOfficialHint.cliFillsIn, .cliRetrying, .cliNeedsLogin, .cliNotFound, .refreshDesktop, .openDesktop].map(\.text)
     english += [ClaudeDesktopHistory.ParseError.unexpectedFormat.localizedDescription,
                 Fmt.clock(at(24, 9), now: at(25, 12)), Fmt.duration(30)]

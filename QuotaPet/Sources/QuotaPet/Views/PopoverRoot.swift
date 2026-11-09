@@ -99,7 +99,8 @@ struct PopoverRoot: View {
                              watchesCodex: state.usesCodex,
                              canFollowApp: state.canFollowApp,
                              cliProbeStatus: store.cliProbeStatus,
-                             cliLoginCommand: store.cliProbeStatus?.needsLogin == true ? store.cliBinary.map(ClaudeCLI.loginCommand) : nil,
+                             onConnectCLI: store.cliBinary == nil ? nil : { store.connectCLI() },
+                             claudeReadingAt: claude?.officialAt,
                              onBack: { state.page = .overview })
             }
         }

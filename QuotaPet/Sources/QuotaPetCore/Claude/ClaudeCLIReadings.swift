@@ -1,7 +1,7 @@
 import Foundation
 
 /// 官方命令行（Claude 桌面端自带的 claude）发一次最小请求时，服务端随响应回来的额度读数。
-/// 只在用户打开「用命令行补官方读数」之后才有（默认关闭），QuotaPet 自己不联网：联网的是命令行，用它自己的登录。
+/// 只在「用命令行补官方读数」开着时才有（默认开启），QuotaPet 自己不联网：联网的是命令行，用它自己的登录。
 public struct CLIReading: Codable, Equatable, Sendable {
     public var time: Date
     /// 命令行登录的组织（`claude auth status` 里的 orgId）。和桌面端对不上的读数不用，见 ClaudeCLIReadings.merge
@@ -261,7 +261,26 @@ public enum ClaudeCLI {
 
     /// 在终端里登录用的命令（路径带空格，用单引号包起来）
     public static func loginCommand(_ binary: URL) -> String {
-        "'" + binary.path.replacingOccurrences(of: "'", with: "'\\''") + "' auth login"
+        shellQuoted(binary.path) + " auth login"
+    }
+
+    static func shellQuoted(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// 设置页上「登录」按钮在终端里跑的脚本（.command 文件，终端打开就执行）：只调用官方命令行的 auth login，
+    /// 登录在浏览器里由用户自己完成，QuotaPet 碰不到凭据。账号不对时（logoutFirst）先退出再登录
+    public static func loginScript(_ binary: URL, logoutFirst: Bool) -> String {
+        let quoted = shellQuoted(binary.path)
+        var lines = ["#!/bin/zsh", "clear",
+                     "echo \"" + tr("QuotaPet：正在登录 Claude 命令行。请在弹出的浏览器里完成登录。",
+                                    "QuotaPet: signing in to the Claude command line. Finish signing in in the browser that opens.") + "\"",
+                     "echo"]
+        if logoutFirst { lines.append(quoted + " auth logout") }
+        lines += [quoted + " auth login", "echo",
+                  "echo \"" + tr("登录流程结束，可以关掉这个窗口。QuotaPet 会自己检查结果。",
+                                 "All done. You can close this window; QuotaPet will check the result by itself.") + "\"", ""]
+        return lines.joined(separator: "\n")
     }
 
     private static func isExecutableFile(_ url: URL) -> Bool {
@@ -343,11 +362,11 @@ public enum ClaudeCLIProbeStatus: Equatable, Sendable {
             return tr("没找到 Claude 命令行（桌面端第一次用 Code 页时会下载）",
                       "Couldn't find the Claude command line (the desktop app downloads it the first time you use the Code tab)")
         case .notLoggedIn:
-            return tr("命令行还没用 Claude 账号登录。在终端里运行下面的命令，登录一次：",
-                      "The command line isn't signed in with a Claude account. Run this in Terminal to sign in once:")
+            return tr("命令行还没登录 Claude 账号：点上面的按钮，在弹出的终端和浏览器里登录一次",
+                      "The command line isn't signed in with a Claude account: click the button above and sign in once in the Terminal and browser that open")
         case .wrongAccount:
-            return tr("命令行登录的账号和桌面端不是同一个，它的读数不会用。先用 auth logout 退出，再登录桌面端用的那个账号",
-                      "The command line is signed in to a different account than the desktop app, so its readings aren't used. Run auth logout, then sign in with the desktop app's account")
+            return tr("命令行登录的账号和桌面端不是同一个，它的读数不会用：点上面的按钮会先退出再登录，请登录桌面端用的那个账号",
+                      "The command line is signed in to a different account than the desktop app, so its readings aren't used: the button above signs out first, then sign in with the desktop app's account")
         }
     }
 
@@ -391,8 +410,8 @@ public enum StalledOfficialHint: Equatable, Sendable {
             return tr("桌面端的官方读数停了，命令行上次补查也没成功，会自动重试",
                       "The desktop app's official readings have stopped and the last command-line check didn't work; it will retry automatically")
         case .cliNeedsLogin:
-            return tr("桌面端的官方读数停了，命令行又没登录，补查不了：到设置里复制登录命令，或在 Claude 桌面端右键点一下它的菜单栏图标",
-                      "The desktop app's official readings have stopped and the command line isn't signed in, so it can't fill them in: copy the sign-in command in Settings, or right-click Claude's menu bar icon")
+            return tr("桌面端的官方读数停了，命令行又没登录，补查不了：到设置里点一下登录按钮，或在 Claude 桌面端右键点一下它的菜单栏图标",
+                      "The desktop app's official readings have stopped and the command line isn't signed in, so it can't fill them in: click the sign-in button in Settings, or right-click Claude's menu bar icon")
         case .cliNotFound:
             return tr("桌面端的官方读数停了，也没找到 Claude 命令行：在 Claude 桌面端右键点一下它的菜单栏图标，读数就会恢复",
                       "The desktop app's official readings have stopped and the Claude command line wasn't found: right-click Claude's menu bar icon to get them going again")

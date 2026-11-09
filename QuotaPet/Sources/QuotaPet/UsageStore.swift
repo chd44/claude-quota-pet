@@ -56,8 +56,11 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    /// 命令行的位置（设置页上的登录命令要用）
+    /// 命令行的位置（找不到时设置页不给登录按钮）
     var cliBinary: URL? { cliProbe?.binary }
+
+    /// 设置页上的一键「开启并登录」
+    func connectCLI() { cliProbe?.connect() }
 
     /// 用户点了刷新：本机文件马上重读，打开了「用命令行补官方读数」的话也让命令行查一次
     func refreshNow() {

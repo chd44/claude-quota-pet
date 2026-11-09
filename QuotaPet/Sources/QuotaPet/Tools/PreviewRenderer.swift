@@ -82,15 +82,15 @@ enum PreviewRenderer {
             for (name, page) in [("", SettingsView.Page.general), ("-claude", .claude), ("-codex", .codex)] {
                 let view = SettingsView(settings: settings, suggestedWeeklyReset: nil, estimation: estimation, hasCodex: true,
                                         codexReadingAt: now.addingTimeInterval(-12 * 60), watchesCodex: true,
-                                        cliProbeStatus: .idle, onBack: {}, page: page)
+                                        cliProbeStatus: .idle, onConnectCLI: {}, claudeReadingAt: now.addingTimeInterval(-9 * 60), onBack: {}, page: page)
                 write(renderInWindow(view, dark: false), to: dir.appendingPathComponent("settings\(name)\(lang).png"))
                 if page == .claude {  // 「官方读数」打开之后：查到了 / 命令行还没登录
-                    let fakeCLI = URL(fileURLWithPath: "/Applications/Claude.app/claude-code/claude")
                     for (suffix, status) in [("-probe", ClaudeCLIProbeStatus.ok(at: now.addingTimeInterval(-9 * 60))),
                                              ("-probe-login", .notLoggedIn)] {
                         let probeView = SettingsView(settings: probeSettings, suggestedWeeklyReset: nil, estimation: estimation,
                                                      hasCodex: true, codexReadingAt: now.addingTimeInterval(-12 * 60), watchesCodex: true,
-                                                     cliProbeStatus: status, cliLoginCommand: ClaudeCLI.loginCommand(fakeCLI),
+                                                     cliProbeStatus: status, onConnectCLI: {},
+                                                     claudeReadingAt: now.addingTimeInterval(-9 * 60),
                                                      onBack: {}, page: .claude)
                         write(renderInWindow(probeView, dark: false), to: dir.appendingPathComponent("settings\(suffix)\(lang).png"))
                     }

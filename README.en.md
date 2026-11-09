@@ -13,7 +13,7 @@ The tighter your quota gets, the more tired she looks. When it runs out she fall
 
 <img src="docs/images/menubar.png" width="484" alt="Menu bar: light and dark menu bars, from 27% up to a 1h23m countdown after hitting the limit">
 
-Reads local files only · No network by default · No login credentials
+Reads local files only · No login credentials · One online check (command-line fill-in, can be turned off)
 
 </div>
 
@@ -145,9 +145,9 @@ make check      # run the self-checks
 make previews   # render the pet, menu bar and popover to PNGs in build/previews
 ```
 
-**Using it on another Mac**: install it on each Mac, following the steps above. QuotaPet only reads files on the Mac it runs on, doesn't go online by default, and doesn't sync between devices, so each one shows what it can see:
+**Using it on another Mac**: install it on each Mac, following the steps above. QuotaPet only reads files on the Mac it runs on, only goes online for the command-line fill-in (which you can turn off), and doesn't sync between devices, so each one shows what it can see:
 
-- Claude: the Claude desktop app must be installed and signed in on that Mac; otherwise you only get the estimate from Claude Code's logs. Recent versions of the desktop app may stop refreshing usage in the background (a server-side switch at Anthropic controls this); if the official reading has stalled, restart the Claude desktop app and it records a fresh one. You can also turn on "Fill in readings via the Claude command line" in Settings (off by default, goes online; see "Where the data comes from" below).
+- Claude: the Claude desktop app must be installed and signed in on that Mac; otherwise you only get the estimate from Claude Code's logs. Recent versions of the desktop app may stop refreshing usage in the background (a server-side switch at Anthropic controls this); it only refreshes after you've recently right-clicked Claude's menu bar icon (about 24 hours). If the official reading has stalled, right-click that icon or restart the Claude desktop app and it records a fresh one. For a permanent fix, sign in on the command line once; "Fill in readings via the Claude command line" in Settings is on by default (goes online; see "Where the data comes from" below). Settings → Claude → Official Reading explains all of this.
 - Codex: the Codex tab only appears once you've used Codex on that Mac.
 - Usage from your phone, the web, another computer, or cloud tasks such as Dots only shows up after that Mac's next official reading (Claude: every 15 minutes) or the next time you use Codex there. If the Codex reading is more than an hour old, the popover says so.
 
@@ -163,7 +163,7 @@ Settings (right-click → Settings…) has a page per topic:
 | Page | Options |
 |---|---|
 | General | Menu bar: when to show (when Claude, or Codex if you use it, is open / always), what to show next to the pet (pet only / 5-hour / 5h + week / highest), animation. Notifications: usage alerts and thresholds (50 / 75 / 90 / 100%, default 75 / 90 / 100), warn before running out, notify when quota resets. Other: language (system / 简体中文 / English), launch at login |
-| Claude | Pet style (Classic / Cat ears / Youthful / Witch / Shades). Live estimate: estimate from local logs, learn the conversion rate automatically (shows the current value), set the weekly reset time manually. Official reading: fill in readings via the Claude command line (off by default) |
+| Claude | Pet style (Classic / Cat ears / Youthful / Witch / Shades). Live estimate: estimate from local logs, learn the conversion rate automatically (shows the current value), set the weekly reset time manually. Official reading: fill in readings via the Claude command line (on by default) |
 | Codex (only if you use it) | Show Codex usage, pet style (Dragon girl / Hanfu / Geek), where the data comes from and when the last reading arrived |
 
 **Can't see the pet?** On MacBooks with a notch, menu bar icons that don't fit are hidden behind the notch. QuotaPet places itself on the far right, next to the clock, the first time it runs. If it's still hidden: hold ⌘ and drag menu bar icons to reorder them, hide icons you don't need in System Settings → Menu Bar, or switch QuotaPet to "Pet only" to save half the width.
@@ -176,13 +176,13 @@ Settings (right-click → Settings…) has a page per topic:
 | Changes between readings | Claude Code's local logs `~/.claude/projects/**/*.jsonl`: token counts are priced at API rates, then converted to a percentage with the learned conversion rate |
 | Reset times | Inferred: a window starts at the first use after the previous window ended. When Claude Code hits a limit, the exact reset time from the server's reply in the log is used |
 | Codex % and reset times | The usage fields (`rate_limits`) Codex writes to `~/.codex/sessions/**/*.jsonl` after every turn. These are official numbers from the server, so nothing is estimated |
-| Fallback official reading (optional, off by default) | With "Fill in readings via the Claude command line" on, while you're using Claude Code and the official reading has gone stale, QuotaPet has the Claude command line send one tiny request (Haiku, one word) and reads the 5-hour and weekly percentages and reset times from the reply, stored in `~/Library/Application Support/QuotaPet/cli-readings.jsonl` |
+| Fallback official reading (on by default, can be turned off) | While "Fill in readings via the Claude command line" is on, while you're using Claude Code and the official reading has gone stale, QuotaPet has the Claude command line send one tiny request (Haiku, one word) and reads the 5-hour and weekly percentages and reset times from the reply, stored in `~/Library/Application Support/QuotaPet/cli-readings.jsonl` |
 
 - **Learned conversion rate**: "how many dollars of API usage ≈ 1% of quota". One number for all models: quota usage turns out to be roughly proportional to API price, and thinking effort needs no separate factor because thinking tokens are billed as output. The one exception is cache reads, which count for only about half. The rate starts at $0.27 per 1% of the 5-hour window and is learned continuously from your own readings (recent data weighs more, with a 3-hour half-life). Settings shows the current value.
 - **Local records**: every 15-minute interval (how much the official reading rose, and what Claude Code spent locally) is appended to `~/Library/Application Support/QuotaPet/intervals.jsonl`, so the history survives Claude Code cleaning up old logs. Until a weekly reset has been seen, the inferred start of the weekly window is kept next to it (`weekly-origin.json`): Claude Code's logs only go back 8 days, and without it the guessed reset time would drift later every day.
 - Usage from chat (including the desktop app), the web and mobile isn't in the local logs, so it shows up with the next official reading (at most 15 minutes later). Whatever the official increase can't be explained by local logs is counted as usage from other apps; the popover shows how much each window got from them, and includes it in the burn rate and the "run out at" estimate.
 - Estimates top out at 99%. Only an official reading or a limit message from Claude Code can declare "used up", so the pet doesn't fall asleep or send a false alert.
-- **No network by default.** "Fill in readings via the Claude command line" is the only feature that goes online, and it's off by default: the Claude command line does the networking with its own login, and QuotaPet reads no login credentials (it only looks at whether `claude auth status` is signed in, and which organization, to make sure it's the same account as the desktop app). Each check uses a little quota. It only runs while you're using Claude Code and the official reading has gone stale, because the 5-hour window starts at the first request, so checking while you're idle would start it early. Sign in once with `claude auth login` in Terminal; Settings shows the command.
+- **One online feature.** "Fill in readings via the Claude command line" is the only feature that goes online, and it's on by default (turn it off in Settings): the Claude command line does the networking with its own login, and QuotaPet reads no login credentials (it only looks at whether `claude auth status` is signed in, and which organization, to make sure it's the same account as the desktop app). Each check uses a little quota. It only runs while you're using Claude Code and the official reading has gone stale, because the 5-hour window starts at the first request, so checking while you're idle would start it early. Sign in once with `claude auth login` in Terminal; Settings shows the command.
 - Codex readings only update when you use Codex on this Mac, so usage from the web or cloud tasks (such as Dots) shows up the next time you use it here, and the popover notes it when the reading is more than an hour old. QuotaPet reads only the usage fields in the conversation logs, never `~/.codex/auth.json` or any other login credentials.
 
 ## Usage lab
