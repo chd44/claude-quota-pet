@@ -88,13 +88,16 @@ public enum ClaudeCLIReadings {
         return found ? reading : nil
     }
 
-    /// utilization 换成百分比，保留一位小数，去掉浮点误差。官方格式是 0–1 的比例；超额时可能略大于 1，照样乘 100、封顶 100（算用完），
-    /// 不能当成已经是百分比，不然 1.05 会变成 1%。percentFormat：同一条读数里有明显是百分比的数（见 looksLikePercent），
-    /// 说明命令行改成了直接给百分比，这时不乘 100
+    /// utilization 换成百分比，保留官方的原始精度（只去掉乘 100 带来的浮点误差，不四舍五入到整数或一位小数：
+    /// 0.9996 是 99.96%，不是「用完了」，显示时再舍入，Fmt.percent 不会把没到 100 的显示成 100%）。
+    /// 官方格式是 0–1 的比例；超额时可能略大于 1，照样乘 100、封顶 100（算用完），不能当成已经是百分比，不然 1.05 会变成 1%。
+    /// percentFormat：同一条读数里有明显是百分比的数（见 looksLikePercent），说明命令行改成了直接给百分比，这时不乘 100
     static func percentValue(_ value: Any?, percentFormat: Bool = false) -> Double? {
         guard let v = number(value), v >= 0 else { return nil }
         let percent = percentFormat ? v : v * 100
-        return (min(percent, 100) * 10).rounded() / 10
+        // 十亿分之一百分点的精度足够去掉浮点噪声；官方值没到 100 时，取整后也不会碰到 100
+        let cleaned = min((percent * 1e9).rounded() / 1e9, 100)
+        return percent < 100 && cleaned >= 100 ? Double(100).nextDown : cleaned
     }
 
     /// 比例再超额也到不了 2 倍，大于 2 的只能是已经换成百分比的数
@@ -269,15 +272,19 @@ public enum ClaudeCLI {
     }
 
     /// 设置页上「登录」按钮在终端里跑的脚本（.command 文件，终端打开就执行）：只调用官方命令行的 auth login，
-    /// 登录在浏览器里由用户自己完成，QuotaPet 碰不到凭据。账号不对时（logoutFirst）先退出再登录
-    public static func loginScript(_ binary: URL, logoutFirst: Bool) -> String {
+    /// 登录在浏览器里由用户自己完成，QuotaPet 碰不到凭据。账号不对时（logoutFirst）先退出再登录。
+    /// environment 是探测用的那份最小环境：脚本用 `env -i` 把它原样交给命令行，终端里的 shell 配置（.zshrc 里的
+    /// CLAUDE_CONFIG_DIR、ANTHROPIC_* 等）不会带进来，登录或退出的就是探测查询的那一份配置
+    public static func loginScript(_ binary: URL, logoutFirst: Bool, environment: [String: String]) -> String {
         let quoted = shellQuoted(binary.path)
+        let assignments = environment.sorted { $0.key < $1.key }.map { "\($0.key)=\(shellQuoted($0.value))" }
+        let run = (["/usr/bin/env", "-i"] + assignments + ["TERM=${TERM:-xterm-256color}"]).joined(separator: " ") + " " + quoted
         var lines = ["#!/bin/zsh", "clear",
                      "echo \"" + tr("QuotaPet：正在登录 Claude 命令行。请在弹出的浏览器里完成登录。",
                                     "QuotaPet: signing in to the Claude command line. Finish signing in in the browser that opens.") + "\"",
                      "echo"]
-        if logoutFirst { lines.append(quoted + " auth logout") }
-        lines += [quoted + " auth login", "echo",
+        if logoutFirst { lines.append(run + " auth logout") }
+        lines += [run + " auth login", "echo",
                   "echo \"" + tr("登录流程结束，可以关掉这个窗口。QuotaPet 会自己检查结果。",
                                  "All done. You can close this window; QuotaPet will check the result by itself.") + "\"", ""]
         return lines.joined(separator: "\n")
@@ -345,6 +352,8 @@ public enum ClaudeCLIProbeStatus: Equatable, Sendable {
     case notLoggedIn
     /// 命令行登录的账号和桌面端不是同一个
     case wrongAccount
+    /// 安全前提不满足，没发请求（见 ClaudeCLIProber）
+    case blocked(ClaudeCLIProbeBlock)
 
     public func text(now: Date) -> String {
         switch self {
@@ -367,6 +376,15 @@ public enum ClaudeCLIProbeStatus: Equatable, Sendable {
         case .wrongAccount:
             return tr("命令行登录的账号和桌面端不是同一个，它的读数不会用：点上面的按钮会先退出再登录，请登录桌面端用的那个账号",
                       "The command line is signed in to a different account than the desktop app, so its readings aren't used: the button above signs out first, then sign in with the desktop app's account")
+        case .blocked(.cliTooOld):
+            return tr("这版 Claude 命令行缺少隔离参数（--safe-mode 等），没法保证补查时不带上你的钩子、插件和自定义设置，所以没有查：更新 Claude 桌面端后会自动恢复",
+                      "This version of the Claude command line lacks the isolation flags (--safe-mode and friends), so a check can't be kept free of your hooks, plugins and custom settings and wasn't made: update the Claude desktop app and it will resume")
+        case .blocked(.managedSettings):
+            return tr("这台电脑上有管理员配置（managed settings），它可能改变请求发往哪里，确认不了安全，所以补查已暂停",
+                      "This computer has admin-managed settings, which could change where the request goes. That can't be verified as safe, so the check is paused")
+        case .blocked(.otherProvider):
+            return tr("命令行当前没有走 Anthropic 官方通道（不是订阅登录的默认通道），补查已暂停，免得请求发到别处",
+                      "The command line isn't using the official Anthropic route right now, so the check is paused to keep the request from going elsewhere")
         }
     }
 
@@ -386,6 +404,8 @@ public enum StalledOfficialHint: Equatable, Sendable {
     case cliNeedsLogin
     /// 没找到命令行：补查不了
     case cliNotFound
+    /// 安全前提不满足，补查暂停
+    case cliBlocked
     /// 桌面端开着：右键点一下它的菜单栏图标就恢复
     case refreshDesktop
     /// 桌面端没开
@@ -396,6 +416,7 @@ public enum StalledOfficialHint: Equatable, Sendable {
         switch status {
         case .notLoggedIn, .wrongAccount: return .cliNeedsLogin
         case .notFound: return .cliNotFound
+        case .blocked: return .cliBlocked
         case .failed: return .cliRetrying
         case .idle, .querying, .ok, .none: return .cliFillsIn
         }
@@ -415,6 +436,9 @@ public enum StalledOfficialHint: Equatable, Sendable {
         case .cliNotFound:
             return tr("桌面端的官方读数停了，也没找到 Claude 命令行：在 Claude 桌面端右键点一下它的菜单栏图标，读数就会恢复",
                       "The desktop app's official readings have stopped and the Claude command line wasn't found: right-click Claude's menu bar icon to get them going again")
+        case .cliBlocked:
+            return tr("桌面端的官方读数停了，命令行补查因为安全前提不满足已暂停（原因见设置）：在 Claude 桌面端右键点一下它的菜单栏图标，读数就会恢复",
+                      "The desktop app's official readings have stopped and the command-line check is paused because a safety condition isn't met (see Settings): right-click Claude's menu bar icon to get them going again")
         case .refreshDesktop:
             return tr("桌面端的官方读数停了（它只在你最近点开过菜单栏图标后才后台刷新）：右键点一下 Claude 的菜单栏图标，读数就会恢复",
                       "The desktop app's official readings have stopped (it only refreshes in the background after you've recently used its menu bar icon): right-click Claude's menu bar icon to get them going again")

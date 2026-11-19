@@ -69,7 +69,10 @@ public enum RateLearner {
             let clean = zip(usable, flags).filter { !$0.1 }.map(\.0)
             if !clean.isEmpty { rate = fit(clean) }
         }
-        return Result(usdPerPercent: min(max(rate, prior / 10), prior * 10),
-                      intervals: mixed.filter { !$0 }.count, latest: latest)
+        // 挑完一个有效的区间都没剩（只有的那几段全是混用的）：rate 是挑掉之前学到的，不能用，回到起始值。
+        // 这样「用到了 0 个区间」和「换算率是起始值」永远是一回事
+        let clean = mixed.filter { !$0 }.count
+        guard clean > 0 else { return Result(usdPerPercent: prior, intervals: 0, latest: nil) }
+        return Result(usdPerPercent: min(max(rate, prior / 10), prior * 10), intervals: clean, latest: latest)
     }
 }

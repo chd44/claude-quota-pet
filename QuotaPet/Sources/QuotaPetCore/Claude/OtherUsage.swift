@@ -4,7 +4,9 @@ import Foundation
 ///
 /// 按相邻两次官方读数逐段算「官方增量 − 这段时间本机请求的估算」。官方读数是整数、估算也有误差，所以：
 /// - 这段时间里（连同开始前 5 分钟，服务器计数可能慢一点）本机一个请求都没有：官方涨多少都算其他端；
-/// - 否则要多出 threshold 以上才算，免得把取整和估算误差当成其他端。
+/// - 否则要多出 threshold 以上才算，免得把取整和估算误差当成其他端；
+/// - 服务器计数慢一点（lag）：读数前不久的请求，这次读数可能还没算上、下一次读数才涨。这种「官方还没算到的本机用量」
+///   记成 credit，带到下一段抵掉；一笔本机用量最多抵一次（用掉就没了），也只在读数前 lag 以内的请求才有。
 /// 用真实数据看过：只用 Claude Code 的时段里，逐段的差值都在这个门槛以内。
 public enum OtherUsage {
     public struct Segment: Equatable, Sendable {
@@ -34,22 +36,33 @@ public enum OtherUsage {
         var result: [Segment] = []
         var from = start
         var high = startValue  // 读数偶尔会往回掉一点（取整），按最高的算，免得回升时被当成新用量
+        var credit = 0.0  // 上一段读数前 lag 以内、官方还没算到的本机用量，在这一段抵掉
         var lo = 0
         for reading in readings where reading.time > from {  // 时间戳重复的读数跳过，不然会出现长度为 0 的段
             while lo < requests.count, requests[lo].time <= from.addingTimeInterval(-lag) { lo += 1 }
             var local = 0.0
+            var recent = 0.0  // local 里读数前 lag 以内的部分：官方可能还没算到
             var nearby = false
             var i = lo
             while i < requests.count, requests[i].time <= reading.time {
                 nearby = true
                 // 第一段包含开启窗口的那个请求
-                if requests[i].time > from || (from == start && requests[i].time == start) { local += percentOf(requests[i]) }
+                if requests[i].time > from || (from == start && requests[i].time == start) {
+                    let cost = percentOf(requests[i])
+                    local += cost
+                    if requests[i].time > reading.time.addingTimeInterval(-lag) { recent += cost }
+                }
                 i += 1
             }
-            let excess = reading.value - high - local
-            if isOther(excess: excess, local: local, nearby: nearby) {
+            let attributed = local + credit  // 这一段里本机用量的总数：本段的请求，加上上一段迟到、这次才算上的
+            let gained = reading.value - high
+            let excess = gained - attributed
+            if isOther(excess: excess, local: attributed, nearby: nearby) {
                 result.append(Segment(start: from, end: reading.time, percent: excess))
             }
+            // 官方涨得比本机用量少：差的那部分如果是读数前 lag 以内的请求，多半是服务器还没算到，留给下一段；
+            // 本段已经用掉的 credit 不再往后带（一笔只抵一次），所以上限是 recent
+            credit = min(recent, max(0, attributed - max(0, gained)))
             from = reading.time
             high = max(high, reading.value)
         }

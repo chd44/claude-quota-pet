@@ -212,7 +212,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private func tooltip(for shown: [UsageSnapshot], now: Date) -> String? {
         let blocks = shown.filter(\.hasData).map { snapshot -> String in
             let lines = snapshot.windows.map { w -> String in
-                var line = "\(w.title) \(Fmt.percent(w.clampedPercent))"
+                var line = "\(w.displayTitle) \(Fmt.percent(w.clampedPercent))"
                 if let reset = w.resetsAt {
                     let when = Fmt.fromNow(reset.timeIntervalSince(now))
                     line += tr("，\(when)重置", ", resets \(when)")

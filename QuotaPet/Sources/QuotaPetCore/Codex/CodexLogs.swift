@@ -17,7 +17,8 @@ public struct CodexRateReading: Equatable, Sendable {
     }
 
     public var time: Date
-    /// 额度桶：Codex 的总额度是 "codex"（老版本没有这个字段）。个别模型有自己单独的桶，App 只看总额度
+    /// 额度桶：Codex 的总额度是 "codex"，老版本没有这个字段（nil）。个别模型有自己单独的桶，App 只看总额度。
+    /// 字段在、却不是字符串（null、数字…）时是 ""：认不出是哪个桶，不能当成老格式的总额度
     public var limitID: String?
     public var windows: [Window]
 
@@ -27,7 +28,7 @@ public struct CodexRateReading: Equatable, Sendable {
         self.windows = windows
     }
 
-    /// 是 Codex 总额度的读数
+    /// 是 Codex 总额度的读数：limit_id 是 "codex"，或者确实没有这个字段（老格式，那时只有总额度一个桶）
     public var isMain: Bool { limitID == nil || limitID == "codex" }
 
     private static let marker = Data("\"rate_limits\"".utf8)
@@ -66,7 +67,9 @@ public struct CodexRateReading: Equatable, Sendable {
         }
         guard !windows.isEmpty else { return nil }
         // rate_limit_reached_type 先不用：见过的日志里它一直是 null，取值和含义没法确认，猜错了宠物会误睡。只认 used_percent
-        return CodexRateReading(time: time, limitID: limits["limit_id"] as? String, windows: windows)
+        let limitID: String?
+        if let raw = limits["limit_id"] { limitID = raw as? String ?? "" } else { limitID = nil }
+        return CodexRateReading(time: time, limitID: limitID, windows: windows)
     }
 }
 
@@ -128,7 +131,7 @@ public final class CodexLogScanner {
             seen.insert(path)
             if cursors[path] == nil, let base, file.modified < base {
                 // 第一次见到、里面的读数又比起点还早：用不上，只从末尾往后跟（接着旧对话聊时会追加）
-                cursors[path] = LineCursor(offset: file.size)
+                cursors[path] = LineCursor(offset: file.size, identityOf: file.url)
                 continue
             }
             var cursor = cursors[path] ?? LineCursor()

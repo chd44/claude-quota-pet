@@ -60,6 +60,10 @@ jobs:
             echo "::error title=自检失败::$(tail -25 "$RUNNER_TEMP/check.log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
           exit 1
 
+      # usage_lab.py 和 App 的日志去重规则要一致（共用 fixtures/transcript-ids.txt，Swift 这边在自检里查）
+      - name: usage_lab.py 去重规则一致
+        run: python3 scripts/check-transcript-parity.py
+
       # 预览图都是假数据，只有 popover-live* 读本机真实额度；runner 上没有真实数据，但还是删掉，免得以后误传
       - name: 渲染预览图
         id: previews
@@ -85,23 +89,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 和 .githooks/pre-commit 同一套规则。本机的钩子要每个 clone 手动启用，在别的电脑、网页上或者云端提交时可能没开，这里兜底
-      - name: 不能有真实数据或截图
+      # 和 .githooks/pre-commit 同一套规则（.githooks/privacy-scan.sh）。本机的钩子要每个 clone 手动启用，在别的电脑、网页上或者云端提交时可能没开，这里兜底。
+      # 查的是整棵树的文件名和内容（二进制也查）：不能有真实数据、截图、本机绝对路径、真实的对话日志。
+      # 自检里用的假路径（/Users/someone）和合成的测试日志（QuotaPet/fixtures/）放行
+      - name: 不能有真实数据、截图、本机路径
         run: |
-          bad=$(git -c core.quotePath=false ls-files |
-            grep -iE '\.jsonl($|\.)|(^|/)popover-live[^/]*\.png$|(^|/)(snapshots|intervals|plan-usage-history)[^/]*$|screenshot|screen shot|cleanshot|截屏|屏幕快照' || true)
-          if [ -n "$bad" ]; then
-            echo "::error::这些文件可能是真实数据或截图："; echo "$bad"; exit 1
-          fi
+          tree="$RUNNER_TEMP/tree"
+          mkdir -p "$tree"
+          git archive HEAD | tar -x -C "$tree"
+          .githooks/privacy-scan.sh dir "$tree"
 
-      # 自检里用的假路径（/Users/a、/Users/someone）放行
-      - name: 不能有本机绝对路径
-        run: |
-          hits=$(git grep -I -nE '/Users/[A-Za-z0-9._-]{2,}|\\/Users\\/[A-Za-z0-9._-]{2,}' |
-            grep -vE '/Users/someone|\\/Users\\/someone' || true)
-          if [ -n "$hits" ]; then
-            echo "::error::文件里有本机绝对路径，换成 ~ 或删掉："; echo "$hits" | cut -c1-200; exit 1
-          fi
+      # 隐私规则自己的回归测试：合成的坏文件要拦住、合法的 fixtures 不能误伤
+      - name: 隐私规则自测
+        run: QuotaPet/scripts/check-privacy-rules.sh
 
       # 只查这次新加的提交；GitHub 网页上合并、编辑时提交者是 noreply@github.com，也放行
       - name: 提交邮箱要用 noreply

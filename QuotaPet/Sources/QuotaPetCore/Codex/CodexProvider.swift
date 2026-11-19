@@ -18,6 +18,12 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
            "No Codex usage records yet. They show up after you use Codex (CLI or desktop app) on this Mac.")
     }
 
+    /// 只记到个别模型自己的额度，没有 Codex 总额度的读数时
+    public static var mainMissingNote: String {
+        tr("只找到 Codex 个别模型的额度记录，没有总额度的读数：总额度缺数据，用 Codex 聊几句后就会记下来。",
+           "Only per-model Codex limits were found, with no overall quota reading: the overall quota is missing and shows up after you chat with Codex.")
+    }
+
     /// 读数太久没更新时给用户看的那句话（预览图也用它）
     public static func staleNote(readAt: Date, now: Date) -> String {
         let ago = Fmt.ago(readAt, now: now)
@@ -34,12 +40,15 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
     public func isRelevantChange(path: String) -> Bool { path.hasSuffix(".jsonl") }
 
     public func snapshot(now: Date) throws -> UsageSnapshot {
-        let all = scanner.refresh(now: now)
-        // 只看 Codex 的总额度；一条总额度都没有时（比如以后改了名字）就用全部的
-        let readings = all.contains(where: \.isMain) ? all.filter(\.isMain) : all
+        // 时间戳在未来的读数（时钟偏差）还不算数，等时间追上了再参与（扫描器里留着）
+        let all = scanner.refresh(now: now).filter { $0.time <= now }
+        // 只看 Codex 的总额度：个别模型自己的额度不能顶替它（那会把某个模型的百分比当成总额度）
+        let readings = all.filter(\.isMain)
         lastReadings = readings
         guard let latest = readings.last else {
-            return UsageSnapshot(provider: .codex, windows: [], generatedAt: now, notes: [Self.missingNote], hasData: false)
+            // 只有个别模型的记录：说总额度缺数据，不拿它们凑
+            return UsageSnapshot(provider: .codex, windows: [], generatedAt: now,
+                                 notes: [all.isEmpty ? Self.missingNote : Self.mainMissingNote], hasData: false)
         }
         let windows = latest.windows.sorted { $0.minutes < $1.minutes }.map {
             window($0, readings: readings, readAt: latest.time, now: now)

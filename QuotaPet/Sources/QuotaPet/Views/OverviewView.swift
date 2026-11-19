@@ -263,7 +263,7 @@ struct WindowCard: View {
         let pace = window.pace(now: now)
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(window.title)
+                Text(window.displayTitle)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()

@@ -52,6 +52,12 @@ make release    # Apple 芯片 + Intel 通用版 zip（build/QuotaPet-<版本>.z
   - 官方读数要属于当前窗口才用：在最近一次重置之后，也不比一个窗口还旧。隔了一个窗口以上还不是 0 的读数（比如 5 小时额度隔夜 50 → 30）算新窗口里的使用，不当成上一个窗口的。
   - 命令行读数（默认开启，设置里可关；2026-11-09 用户明确要求从默认关闭改成默认开启，原来存了开关的用户不受影响）：`CLIProbe`（App 里）让官方命令行发一个最小请求，`ClaudeCLIReadings.parse` 从 stream-json 输出的 `rate_limit_event` 里取 `unifiedWindows` 的 `utilization`（0–1 小数；超额时可能略大于 1，照样乘 100、封顶算用完。同一条里有大于 2 的数才当成命令行改成了直接给百分比，见 `looksLikePercent`）和 `resetsAt`（秒），存进 `cli-readings.jsonl`（`CLIReadingArchive`，留 8 天，和 `intervals.jsonl` 在一起）。`ClaudeProvider` 把它们和桌面端读数合并（`ClaudeCLIReadings.merge`：组织以桌面端最近一次为准，对不上的不用），所以换算率学习、其他端用量、窗口推算都不用管读数从哪来。官方给的 `resetsAt` 比手动指定的和推算的优先（`buildWindow` 的 `officialReset`；限流中仍以限流消息为准）：每周窗口按它每 7 天往后推，5 小时窗口只有还没到的才算当前窗口的结束，已经过了的当成一次精确重置（进 `knownResets`），不往后接着排一个 5 小时。
   - 什么时候查在 `ClaudeCLIProbePolicy`（Core，进自检）：5 小时窗口已经在跑、官方读数之后有本机用量、官方读数超过 17 分钟没来，才自动查；失败按倍数退避、最多 2 小时。**不在用的时候不查**：窗口从第一次请求才开始计时，空闲时查会让它提前开始。手动刷新、刚打开开关会立刻查一次。只认 `authMethod == claude.ai` 的订阅登录，进程环境里的 API Key 和第三方云开关会去掉。
+  - 发请求的安全前提在 `ClaudeCLIProber`（Core，用假的 `CLICommandExecutor` 进自检；App 里的真实执行在 `CLIProbe.swift` 的 `ProcessCommandExecutor`）：进程环境只留白名单（`probeEnvironmentKeys`：HOME、`CLAUDE_CONFIG_DIR`、代理、证书等，PATH 固定成系统目录），`auth status` 要 `authMethod == claude.ai` 且 `apiProvider == firstParty`（第三方云不查）；先看 `--help` 里有没有 `--safe-mode`、`--setting-sources`、`--strict-mcp-config`，缺了就 `blocked(.cliTooOld)`、不发请求（`--tools ""` 只关内置工具，不等于隔离）；发现企业托管设置文件（`managedSettingsPaths`，只看存不存在）也不发。请求带 `--safe-mode --setting-sources local --strict-mcp-config`。关掉开关作废在途的一切：`CLIProbe.generation` 加一、`CLIProbeCancellation` 取消（启动子进程和检查取消在同一把锁里）、登录脚本删掉；一键登录用同一份最小环境，脚本放在 0700 的私有临时目录里。
+  - 读数时间在「现在」之后的样本（时钟回拨、测试数据）一律不用（Claude 桌面端、命令行、Codex 都是）；`percentValue` 保留精度，不到 100 的读数（比如 99.96）不会被四舍五入成 100。
+  - `WindowInference`：精确重置时间（官方给的 `resetsAt`）没有任何用量也要生效（窗口重置成 0%、`official` 为 nil）。
+  - 区间记录（`UsageInterval`）遇到已知重置（5 小时窗口的重置、每周额度固定 168 小时的周期）就把那一边的增量记成 nil，不拿跨周期的增量学换算率；`RateLearner` 所有区间都被排除（全是混用的）时回到起始值，`usage_lab.py` 的 `learn` 一样。`OtherUsage` 会把读数前不久才记账的本机用量算进上一段（`credit`），不重复算成其他端用量。
+  - 提醒：`UsageAlerts.State` 带周期号（`cycle`），改设置引起的变化（`settingsChanged`）不清掉本周期的记录；发不出去的提醒按「窗口周期 + 提醒类型」记到 `retryThresholds`，下次再试，不会因为并发的另一次结果被覆盖；合并进阈值提醒的「快用完」也遵守总开关和每个周期一次。
+  - Codex：`limit_id` 存在但不是字符串（null 等）时不算总额度；只有个别模型的额度桶、没有总额度读数时，不拿它顶替，窗口显示没有数据并写明原因。
   - 桌面端的官方读数会停：新版桌面端只在用户最近右键点过它的菜单栏图标之后才后台刷新额度（它的日志里是 `background poll paused: tray not opened recently`，约 24 小时），之后 `plan-usage-history.json` 就不再变。面板底部那句话由 `StalledOfficialHint`（Core，进自检）按命令行补查的状态挑：命令行没登录、找不到时不能再说「会补查」，要说补查不了、怎么办。桌面端自带命令行的登录会丢，`auth status` 看到 `loggedIn: false` 就是这样。
   - 设置 → Claude → 官方读数里有一键「开启并登录」（`CLIProbe.connect`）：没开补查就先打开开关、查一次，结果是没登录或账号不对才弹终端；已经登录了不打扰。弹的是 `ClaudeCLI.loginScript` 写的 `.command` 脚本（只跑官方命令行的 `auth login`，账号不对时先 `auth logout`），用终端打开；登录在浏览器里由用户自己完成，QuotaPet 碰不到凭据。之后每 8 秒静默看一眼（`quiet`：不闪「正在查询」、不拉长退避），最多等 10 分钟。设置页不再显示命令文本。
   - Claude Code 被限流时会在日志里写一条 synthetic 消息，带 `quotaLimits`（`rateLimitType`、秒级 `resetsAt`）。扫描器把它记成 `ClaudeLimitEvent`：没到恢复时间前这个窗口直接算用完，重置时间以它为准。
@@ -61,8 +67,10 @@ make release    # Apple 芯片 + Intel 通用版 zip（build/QuotaPet-<版本>.z
   - 读数就是官方百分比，不用估算；只看总额度（`limit_id` 是 `codex` 或没有），个别模型单独的额度桶不显示。300 分钟和 10080 分钟的窗口用和 Claude 一样的 id（`five_hour`、`seven_day`），菜单栏的「5 小时」「5h + 周」对两家都管用；某家没有这种窗口时退回最紧张的窗口。
   - 最近一次读数之后已经过了重置时间的窗口算 0%、没有重置时间（等下次使用）。消耗速度用同一个窗口里的历次读数算，回看时长和 Claude 一样（5 小时窗口 30 分钟，其他 24 小时）。
   - 日志可能有几百 MB：`CodexLogScanner` 第一次从最近改过的文件往前读，读到一次比「现在 − 25 小时」还早的读数（算每周消耗速度的起点）为止，更早的文件只从末尾往后跟。两家的扫描器都用 `LineCursor` 增量读：分块读、每块包在 `autoreleasepool` 里，不然第一次扫描时内存会涨几百 MB。
+  - `LineCursor` 不只比文件长度：记着文件的身份（设备、inode，加上开头 128 字节的指纹），身份对不上（同名文件被改名换掉、原地改写）就从头读；一行超过 `maxLineLength`（32 MB）就不再攒、丢到下一处换行恢复，普通半行照旧等补全。开头 128 字节一样的原地改写认不出来。
   - `UsageStore` 按数据源分开刷新：文件变了只重算那一家（`providersAffected`），每分钟兜底全部重算，也顺便给启动后才出现的目录补上监听。
-  - 文件事件触发的重算同一家至少隔 5 秒（`RefreshThrottle`，Core，进自检）：Claude Code 干活时日志大约每秒写一次，每次都把日志目录整个走一遍、快照整个重算太费电。已经在等的那家不重复排，开始算时读的是那时候的文件；每分钟兜底、手动刷新、改设置不受限频管。
+  - `FileWatcher` 的流启动失败（`FSEventStreamStart` 返回 false）时 init 返回 nil，`UsageStore` 不把这些目录记成「正在监听」，下一次每分钟兜底再试。回调带事件标志（`FileEventFlags`）：MustScanSubDirs / UserDropped / KernelDropped / RootChanged 表示不知道哪个文件变了，`WatchRouting.providersAffected`（Core，进自检）不再看 `isRelevantChange`，监听这个路径的几家整个重算。
+  - 刷新排期在 `RefreshGate`（Core，进自检，时间由调用方传入、用单调时钟 `systemUptime`）：文件事件触发的重算同一家至少隔 5 秒，**从后台队列上真正开始算那一刻起算**（`began`），不从排队、也不从防抖到点起算。Claude Code 干活时日志大约每秒写一次，每次都把日志目录整个走一遍、快照整个重算太费电。每家三个阶段：空闲、排着队、正在算；排着队时的文件变化不用管（开始算时读的是那时候的文件），正在算时的变化记成脏、算完再按限频排一次，开始算时之前排着的定时器作废（token 对不上）。每分钟兜底、手动刷新、改设置、唤醒走 `request`，不受限频管：不空闲就记「再来一次」，算完马上再算。
   - 只解析带 `rate_limits` 的行，只取时间和额度字段；`~/.codex` 下别的文件（`auth.json` 登录凭据、数据库）都不碰。
 - **和 `usage_lab.py` 要保持一致的地方**，改一边就要改另一边（只涉及 Claude；Codex 不用估算，usage_lab 里没有它）：
   - `ClaudePricing.currentPrice` 对应 `PRICES`（各族当前这一代），`olderPrices` 对应 `OLDER_PRICES`（同一族里价格不一样的老版本），按提示词长短分档（`ModelPrice.longPromptAbove` / `longPromptMultiplier`，现在只有 Haiku 5.5：输入 + 缓存写 + 缓存读超过 10 万 token 的整个请求 5 倍）对应 `PRICES` 元组的后两项和 `applied()`，`cacheReadQuotaWeight` 对应 `CACHE_READ_WEIGHT`，`ClaudeRates.starting` 对应 `STARTING`，`OtherUsage.threshold` 对应 `OTHER_THRESHOLD`
@@ -70,6 +78,7 @@ make release    # Apple 芯片 + Intel 通用版 zip（build/QuotaPet-<版本>.z
   - `ClaudePricing.version` / `price(model:family:)` 对应 `version()` / `price()`：每个请求按模型名里的版本号定价（`claude-opus-5` 按 Opus 5 的价格，不是 Opus 5.5 的）。出了新一代、价格变了时，把旧的当前价挪进老版本表，再改当前价
   - 改价格会让已经存下的区间花费不对（`intervals.jsonl` 只追加）：改价格表时给 `ClaudePricing.basis` 加一，区间记录里存着当时的版本（`UsageInterval.priceBasis`，旧记录没有就当 1）；新切出来的区间会换掉旧版本的，换不掉的、花费里有 Haiku 的不拿来学换算率。其他族的价格改了要不要排除，照 `hasHaikuSpend` 的写法改。
   - `ClaudeTranscripts` 的解析规则：按 `message.id` 去重、同一个响应的各字段取最大值、跳过 synthetic 和写到一半的行（限流消息只有 App 读，usage_lab 不需要）
+  - 缺 ID 的行的去重键：`message.id` → `requestId` → （文件, `uuid`），都取非空的；三个都没有的行在同一个文件里合成一条。`usage_lab.py` 的 `load_requests` 一样；共用的合成数据在 `QuotaPet/fixtures/transcript-ids.txt`（不能叫 .jsonl，会被隐私检查拦），Swift 这边在自检里查，Python 那边跑 `python3 QuotaPet/scripts/check-transcript-parity.py`。
 - 改换算相关的逻辑之前，先看 `docs/PRODUCT_PLAN.md` 第 7 节的回归结论：所有模型用一个系数，思考程度（effort）不单独算，缓存读按半价。改完用 `python3 usage_lab.py backtest` 回测，和改之前比一比。
 - 宠物的八款形象都是 GPT 出图切成的图片，没有像素画，也没有单色模式（0.2.0 及以前有过，已经删掉）。`PetFrame` 里的图是 `PetPicture`（哪款形象、头像还是半身像、哪个表情），`PetRenderer` 只负责读图；各种心情播哪几个表情在 `PetSprites.frames`。
   - 两家各有一组形象，互不重叠：Claude 是 `PetStyle.claudeChoices`（经典、猫耳、青春、魔女、墨镜 `shades`），Codex 是 `codexChoices`（龙娘 `dragon`、汉服 `hanfu`、极客 `geek`）。`PetStyle.of(_:claudeStyle:codexStyle:)` 决定每家用哪个，存的形象不在那组里就用那组第一款。加一款：`PetStyle` 加 case 和名字，放进其中一组，配一份 `design/painted/<rawValue>.json`。
@@ -87,7 +96,7 @@ make release    # Apple 芯片 + Intel 通用版 zip（build/QuotaPet-<版本>.z
 - 第一次启动（`QuotaPetCore/FirstLaunch.swift`，设置里只有 NS 开头的 AppKit 键才算）时宠物一直显示到退出，并弹出面板；开机自启先挂起（`loginItemPending`），等 App 在「应用程序」文件夹里运行时才打开（下载版第一次常在「下载」里被 macOS 挪到临时目录运行），用户自己开关成功过就不再管（`FirstLaunch.clearsLoginItemPending`：打开要在「应用程序」里才算，失败了留着）。要在系统设置「登录项」里允许时，用户自己点的会帮他打开那一页。同时有几个 QuotaPet 在跑时留最早启动的（`FirstLaunch.launchedEarlier`），后来的请它把宠物叫出来再退出。
 - 界面支持简体中文和英文（`QuotaPetCore/Localization.swift`），默认跟随系统，设置 → 通用 → 语言可以改：
   - 每句界面文字都写成 `tr("中文", "English")`，两种语言写在一起；新加或改界面文字时两种都要写。英文里的数量用 `plural(n, "day")` 分单复数（数字要换写法时传 `shown:`，比如 `plural(n, "token", shown: Fmt.tokens(n))`）。
-  - 当前语言在 `L10n.language`，由 `AppSettings.language` 在 willSet 里同步（订阅者要读到新语言）。快照里的窗口名、说明文字是后台按当前语言算的，换语言时 `UsageStore` 会重算，面板用 `.id(settings.language)` 整个重建。
+  - 当前语言在 `L10n.language`，由 `AppSettings.language` 在 willSet 里同步（订阅者要读到新语言）。快照里的窗口名、说明文字是后台按当前语言算的，换语言时 `UsageStore` 会重算，面板用 `.id(settings.language)` 整个重建。窗口名界面和通知里一律用 `UsageWindow.displayTitle`（按窗口 id 在当前语言下生成），不用快照里存的 `title`：重算之前或者提醒记录里的旧快照可能还是旧语言。
   - 自检开头固定成中文；「多语言」一节查英文，并检查英文里没混进中文。App 本体的文字自检覆盖不到，改了要看 `make previews` 的 `-en` 图。
   - `--dump` 是对账工具，固定输出中文。App 在访达、通知里显示的名字在 `Resources/*.lproj/InfoPlist.strings`。
   - 仓库首页有中英两份：`README.md` 和 `README.en.md`（英文版还收了 `QuotaPet/README.md` 里的用法和设置项）。改了功能、设置项或截图，两份都要改。
@@ -100,8 +109,10 @@ make release    # Apple 芯片 + Intel 通用版 zip（build/QuotaPet-<版本>.z
 - `make previews` 会额外生成 `popover-live.png` 和 `popover-live-dark.png`，用的是**本机真实额度数据**（Claude 和 Codex），不能复制进 `docs/images/` 或提交；其余预览图都是假数据。
 - `make dump` 和 `usage_lab.py` 的输出、`snapshots.jsonl`、`intervals.jsonl` 都是真实数据，不进 git，也不贴进 issue 或 PR。
 - `.githooks/pre-commit` 会在提交时拦住 `.jsonl` 文件、截图、`popover-live*`、本机绝对路径和不是 noreply 的邮箱。它是用 `git config core.hooksPath .githooks` 启用的，被拦了就改内容，不要加 `--no-verify` 绕过。
+  - 规则在 `.githooks/privacy-scan.sh`（`names` 查文件名、`text` 查内容、`dir` 两样都查），提交钩子、CI（整棵树，二进制也查）和 `make release` 共用：文件名、本机绝对路径（任何用户名，假路径 `someone` 放行）、真实的 Claude Code 对话日志（带 `sessionId` 等会话字段的行，改后缀也一样）。合成的对话日志（`QuotaPet/fixtures/*.txt`）不带这些字段，放行。改规则后跑 `QuotaPet/scripts/check-privacy-rules.sh`（合成的坏文件、坏压缩包、临时仓库里的钩子，CI 里也会跑）。
   - 云端会话（claude.ai/code）启动时 `.claude/hooks/session-start.sh` 先把这个 clone 的提交身份换成登录的 GitHub 账号的 noreply 地址（云端默认的 `noreply@anthropic.com` 会被它和 CI 拦下；`gh` 用不了时，本仓库用主人的地址），有了 noreply 身份才启用它，没有就撤掉旧版脚本留下的设置；这两步在装 Pillow / numpy 之前做，装不上也不影响。不要再把身份改回去。
 - 发 Release 的包也不能带本机信息：`build-app.sh` 会 `strip -S` 去掉调试符号（里面记着编译时的本机绝对路径和用户名），`make release` 打完包会查一遍 `/Users/`，有就失败。
+  - `build-app.sh` 不整个拷 `Resources/Pets`，按清单一张张拷：`design/painted/<形象>.json` × `PaintedArt.swift` 里的表情 × {portrait, icon}，缺一张就失败，目录里多出来的东西不进包。`make release` 打完包后跑 `scripts/check-release-archive.sh`：把最终的 zip 解开，查文件名、内容、顶层只有 `QuotaPet.app`、宠物图目录里只有 `portrait-/icon-<表情>.png`、没有隐藏文件。
 
 ## 什么时候用哪个技能
 

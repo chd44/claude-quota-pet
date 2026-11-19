@@ -146,7 +146,9 @@ def load_requests():
                     cw5, cw1h = u.get("cache_creation_input_tokens") or 0, 0
                 tok = {"inp": u.get("input_tokens") or 0, "cw5": cw5, "cw1h": cw1h,
                        "cr": u.get("cache_read_input_tokens") or 0, "out": u.get("output_tokens") or 0}
-                key = m.get("id") or d.get("requestId") or (path, d.get("uuid"))
+                # 和 App（ClaudeTranscriptScanner.ingest）一样：message.id → requestId → (文件, uuid)，都取非空的；
+                # 三个都没有的行归到同一个文件里的同一条（取各字段最大值）
+                key = m.get("id") or d.get("requestId") or (path, d.get("uuid") or None)
                 prev = reqs.get(key)
                 if prev:  # 同一响应取各字段最大值（流式中途写入的行可能偏小）
                     for k in FIELDS:
@@ -357,6 +359,8 @@ def learn(done, prior, half_life):
         clean = [x for x, f in zip(items, flags) if not f]
         if clean:
             rate = fit(clean)
+    if all(mixed):  # 挑完一个有效的区间都没剩：rate 是挑掉之前学到的，不能用，回到起始值（和 App 的 RateLearner 一样）
+        return prior
     return min(max(rate, prior / 10), prior * 10)
 
 

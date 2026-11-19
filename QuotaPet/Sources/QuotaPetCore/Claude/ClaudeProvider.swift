@@ -101,7 +101,9 @@ public final class ClaudeProvider: UsageProvider, @unchecked Sendable {
         let cliReadings = cfg.useCLIReadings ? loadCLIReadings(now: now) : []
         let desktop: [PlanUsageSample]
         switch loadHistory() {
-        case .ok(let s):
+        case .ok(let all):
+            // 缓存里是文件里的全部读数：未来时间戳的读数和组织都按这次的现在来筛
+            let s = ClaudeDesktopHistory.current(all, now: now)
             desktop = s
             if s.isEmpty, cliReadings.isEmpty {
                 notes.append(tr("Claude 桌面端还没记录到额度，暂时只能用本机日志估算。",
@@ -124,8 +126,18 @@ public final class ClaudeProvider: UsageProvider, @unchecked Sendable {
         lastSamples = samples
 
         // 每来一次官方读数就多一个完整区间：存进记录，再从全部记录里学换算率
+        // 确定的重置时刻：区间里跨过了的，官方「增量」属于两个窗口，不拿来学换算率（只用精确的：官方给的重置时间、
+        // 限流消息、手动指定的每周重置时间；推算出来的不算）
+        func limitResets(_ window: String, duration: TimeInterval) -> [Date] {
+            limits.filter { $0.window == window && $0.time <= now && $0.resetsAt > $0.time && $0.resetsAt <= $0.time.addingTimeInterval(duration) }
+                .map(\.resetsAt)
+        }
+        let sessionResets = limitResets("five_hour", duration: Self.sessionDuration).filter { $0 <= now }
+            + usableCLI.compactMap(\.sessionResetsAt).filter { $0 <= now }
+        let weeklyAnchors = limitResets("seven_day", duration: Self.weekDuration) + usableCLI.compactMap(\.weeklyResetsAt)
+            + [cfg.weeklyResetAnchor].compactMap { $0 }
         var recorded = UsageInterval.extract(samples: samples, requests: requests, since: now.addingTimeInterval(-scanner.retention),
-                                             now: now)
+                                             sessionResets: sessionResets, weeklyResetAnchors: weeklyAnchors, now: now)
         if let archive {
             archive.merge(recorded)
             recorded = archive.intervals
@@ -172,6 +184,8 @@ public final class ClaudeProvider: UsageProvider, @unchecked Sendable {
                      series: [UsageSample], requests: [ClaudeRequest], scale: Double,
                      percentOf: (ClaudeRequest) -> Double, resetAnchor: Date?, officialReset: Date? = nil, fixedCadence: Bool = false,
                      limits: [ClaudeLimitEvent] = [], origin: Date? = nil, live: Bool, now: Date) -> UsageWindow {
+        // 时间戳在未来的读数还不算数：选最新读数、重置锚点之前先筛掉，等时间追上了再参与
+        let series = series.filter { $0.time <= now }
         // 和这个窗口的官方读数对不上的限流消息（多半是别的账号，或者额度变了）不用，见 limitEvidenceFloor
         func matchesOfficial(_ limit: ClaudeLimitEvent) -> Bool {
             let start = limit.resetsAt.addingTimeInterval(-duration)
@@ -356,11 +370,12 @@ public final class ClaudeProvider: UsageProvider, @unchecked Sendable {
     private func loadCLIReadings(now: Date) -> [CLIReading] {
         guard let cliArchive, let mtime = cliArchive.modificationDate else { return [] }
         // 缓存的是文件里的全部读数：过了保留期的在使用时去掉（文件不变时缓存里的不会自己过期）
+        // 时间戳在未来的读数（时钟偏差）等时间追上了才参与：缓存里留着，用的时候按这次的现在筛
         let cutoff = now.addingTimeInterval(-ClaudeCLIReadings.retention)
-        if let cache = cliCache, cache.mtime == mtime { return cache.readings.filter { $0.time > cutoff } }
+        if let cache = cliCache, cache.mtime == mtime { return cache.readings.filter { $0.time > cutoff && $0.time <= now } }
         let readings = cliArchive.readings(now: now)
         cliCache = (mtime, readings)
-        return readings.filter { $0.time > cutoff }
+        return readings.filter { $0.time > cutoff && $0.time <= now }
     }
 
     private func loadHistory() -> HistoryState {
@@ -368,7 +383,7 @@ public final class ClaudeProvider: UsageProvider, @unchecked Sendable {
         let mtime = attrs[.modificationDate] as? Date ?? .distantPast
         if let cache = historyCache, cache.mtime == mtime { return .ok(cache.samples) }
         do {
-            let samples = try ClaudeDesktopHistory.parse(Data(contentsOf: historyURL))
+            let samples = try ClaudeDesktopHistory.parseAll(Data(contentsOf: historyURL))
             historyCache = (mtime, samples)
             return .ok(samples)
         } catch {

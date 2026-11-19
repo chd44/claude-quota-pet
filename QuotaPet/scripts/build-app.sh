@@ -29,7 +29,22 @@ fi
 strip -S "$APP/Contents/MacOS/QuotaPet"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp -R Resources/*.lproj "$APP/Contents/Resources/"  # 各语言的 App 名字（访达、通知里显示的）
-cp -R Resources/Pets "$APP/Contents/Resources/"     # 精绘宠物的图（design/painted/export_painted.py 导出）
+# 精绘宠物的图（design/painted/export_painted.py 导出）：按清单一张张拷，不整个目录拷。
+# 清单 = 每款形象（design/painted/<形象>.json）× 表情（PaintedArt.swift 里的 faces）× {portrait, icon}；
+# 目录里多出来的东西（原图、.DS_Store、没登记的形象）不会进发布包
+faces=$(sed -n 's/^ *static let faces: \[String\] = \[\(.*\)\].*/\1/p' Sources/QuotaPetCore/Pet/PaintedArt.swift | tr -d '" ' | tr ',' ' ')
+[[ -n "$faces" ]] || { echo "❌ 读不出 PaintedArt.swift 里的表情清单"; exit 1; }
+for config in design/painted/*.json; do
+    style=$(basename "$config" .json)
+    mkdir -p "$APP/Contents/Resources/Pets/$style"
+    for face in $faces; do
+        for kind in portrait icon; do
+            src="Resources/Pets/$style/$kind-$face.png"
+            [[ -f "$src" ]] || { echo "❌ 缺宠物图：$src"; exit 1; }
+            cp "$src" "$APP/Contents/Resources/Pets/$style/"
+        done
+    done
+done
 
 # 用经典款的宠物生成 App 图标（大图标用 Resources/AppIcon.png，它不拷进 App 包）
 "$BIN" --render-icon build/AppIcon.iconset

@@ -21,6 +21,11 @@ public struct UsageInterval: Codable, Equatable, Sendable {
     public var thinkingTokens: Int
     /// 这段的花费是按哪一版价格算的（ClaudePricing.basis）；旧版本记下的没有这一项，当成 1
     public var priceBasis: Int? = nil
+    /// 这一段里这个窗口有没有跨过一次确定的重置（官方给的重置时间、限流消息、手动指定的每周重置时间）。
+    /// 跨过的话两头的读数属于两个窗口，官方「增量」不是这段本机花费换来的，不能拿来学换算率。
+    /// 只有能确定重置时刻的才算（读数掉下去的已经在 delta 里排除了）；旧记录没有这一项，当作没跨过
+    public var sessionCrossedReset: Bool? = nil
+    public var weeklyCrossedReset: Bool? = nil
 
     /// 花费是按当前这版价格算的
     public var isCurrentPriceBasis: Bool { (priceBasis ?? 1) >= ClaudePricing.basis }
@@ -28,11 +33,11 @@ public struct UsageInterval: Codable, Equatable, Sendable {
     /// 花费里有 Haiku：价格改过之后旧版本记下的这种区间花费不对，本机日志又不在了没法重算，就不拿来学换算率
     public var hasHaikuSpend: Bool { usdByGroup.contains { $0.key.hasPrefix("haiku") && $0.value > 0 } }
 
-    /// 这段时间里官方读数涨了多少；中间重置过就是 nil
-    public var sessionDelta: Double? { Self.delta(sessionFrom, sessionTo) }
+    /// 这段时间里官方读数涨了多少；中间重置过（读数掉了，或者确定跨过了重置）就是 nil
+    public var sessionDelta: Double? { sessionCrossedReset == true ? nil : Self.delta(sessionFrom, sessionTo) }
     /// 额度加权花费（缓存读打折，见 ClaudePricing.cacheReadQuotaWeight）；旧记录算不出来，是 nil
     public var quotaUSD: Double? { cacheReadUSD.map { ClaudePricing.quotaCost(usd: usd, cacheReadUSD: $0) } }
-    public var weeklyDelta: Double? { Self.delta(weeklyFrom, weeklyTo) }
+    public var weeklyDelta: Double? { weeklyCrossedReset == true ? nil : Self.delta(weeklyFrom, weeklyTo) }
 
     static func delta(_ from: Double?, _ to: Double?) -> Double? {
         guard let from, let to, to >= from else { return nil }
@@ -46,9 +51,11 @@ public struct UsageInterval: Codable, Equatable, Sendable {
     /// 从官方读数和本机请求里切出完整的区间。只要正常的间隔（≤ 20 分钟，说明桌面端一直开着），
     /// 并且已经结束 settleDelay 以上（晚写进日志的请求也算进来了）。requests 要按时间排序。
     /// since：requests 从什么时候开始是全的（扫描器的保留期）。桌面端的读数可能早得多，更早开始的区间
-    /// 本机花费看不全，会被当成 0 记进只追加的记录里，所以不切
+    /// 本机花费看不全，会被当成 0 记进只追加的记录里，所以不切。
+    /// sessionResets：5 小时窗口确定的重置时刻；weeklyResetAnchors：每周窗口任何一次确定的重置时刻，
+    /// 每周额度按固定的 168 小时（ClaudeProvider.weekDuration）循环，往前往后都推。区间里跨过了的，按窗口分别标出来
     public static func extract(samples: [PlanUsageSample], requests: [ClaudeRequest], since: Date = .distantPast,
-                               now: Date) -> [UsageInterval] {
+                               sessionResets: [Date] = [], weeklyResetAnchors: [Date] = [], now: Date) -> [UsageInterval] {
         var intervals: [UsageInterval] = []
         var first = 0
         for (a, b) in zip(samples, samples.dropFirst()) {
@@ -70,9 +77,19 @@ public struct UsageInterval: Codable, Equatable, Sendable {
                 interval.thinkingTokens += r.thinkingTokens
                 i += 1
             }
+            interval.sessionCrossedReset = sessionResets.contains { $0 > a.time && $0 <= b.time } ? true : nil
+            interval.weeklyCrossedReset = weeklyResetAnchors.contains {
+                Self.crossesCycle(anchor: $0, period: ClaudeProvider.weekDuration, after: a.time, upTo: b.time)
+            } ? true : nil
             intervals.append(interval)
         }
         return intervals
+    }
+
+    /// 从 anchor 起每 period 一次的重置，在 (after, upTo] 里有没有
+    static func crossesCycle(anchor: Date, period: TimeInterval, after: Date, upTo: Date) -> Bool {
+        let next = anchor.addingTimeInterval(period * ((after.timeIntervalSince(anchor) / period).rounded(.down) + 1))
+        return next > after && next <= upTo
     }
 }
 
@@ -143,6 +160,9 @@ public final class IntervalArchive {
     static func canUpgrade(_ old: UsageInterval, to new: UsageInterval) -> Bool {
         // 价格表改过：旧价格算的花费用新价格重算的换掉（新切出来的才有本机日志，日志不在了的留着旧的）
         if (old.priceBasis ?? 1) < (new.priceBasis ?? 1) { return true }
+        // 后来才知道这一段跨过了重置（比如命令行读数、限流消息晚到）：补上标记，免得它被拿去学换算率
+        if (new.sessionCrossedReset == true && old.sessionCrossedReset != true)
+            || (new.weeklyCrossedReset == true && old.weeklyCrossedReset != true) { return true }
         return old.cacheReadUSD == nil && new.cacheReadUSD != nil && abs(old.usd - new.usd) < 0.01
     }
 

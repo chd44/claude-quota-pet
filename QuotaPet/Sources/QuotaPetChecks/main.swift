@@ -219,6 +219,116 @@ do {  // Haiku 5.5 按提示词（输入 + 缓存写 + 缓存读）长短分两�
     check(r.count == 1 && near(r.first?.usd, 0.0045 + 0.01 + 0.025), "Haiku 5.5：合并后的提示词 11 万按高档：\(r.first?.usd ?? -1)")
 }
 
+do {  // 缺 ID 的行怎么去重（和 usage_lab.py 一致，同一份 fixtures/transcript-ids.txt，scripts/check-transcript-parity.py 跑另一边）
+    let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("fixtures/transcript-ids.txt")
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("quotapet-ids-\(UUID().uuidString)")
+    let dir = root.appendingPathComponent("proj")
+    try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try! FileManager.default.copyItem(at: fixture, to: dir.appendingPathComponent("session.jsonl"))
+    let scanner = ClaudeTranscriptScanner(root: root, retention: 365 * 86400)
+    let got = scanner.refresh(now: at(25, 23)).map { [$0.tokens.input, $0.tokens.output] }.sorted { $0[0] < $1[0] }
+    check(got == [[1, 30], [2, 40], [3, 50], [6, 80], [9, 7]],
+          "message.id → requestId → (文件, uuid)；三个都没有的行合成一条、各字段取最大值：\(got)")
+    try? FileManager.default.removeItem(at: root)
+}
+
+do {  // 通过扫描器：同名、同长度的文件被换掉（先写临时文件再改名），新内容也要读到
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("quotapet-replace-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let dir = root.appendingPathComponent("proj")
+    try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appendingPathComponent("s.jsonl")
+    try! (logLine("aa1", "2026-09-25T02:00:00.000Z", "claude-sonnet-5", output: 1000) + "\n").write(to: url, atomically: true, encoding: .utf8)
+    let scanner = ClaudeTranscriptScanner(root: root, retention: 365 * 86400)
+    check(scanner.refresh(now: at(25, 23)).map(\.id) == ["aa1"], "Claude 日志：先读到旧文件")
+    let new = dir.appendingPathComponent("s.new")
+    try! (logLine("bb2", "2026-09-25T02:01:00.000Z", "claude-sonnet-5", output: 2000) + "\n").write(to: new, atomically: false, encoding: .utf8)
+    check(fm.fileExists(atPath: new.path) && (try! fm.attributesOfItem(atPath: new.path)[.size] as! NSNumber) == (try! fm.attributesOfItem(atPath: url.path)[.size] as! NSNumber),
+          "测试前提：新旧文件一样长")
+    _ = try! fm.replaceItemAt(url, withItemAt: new)
+    check(scanner.refresh(now: at(25, 23)).map(\.id).contains("bb2"), "Claude 日志：同名同长度的新文件里的请求也读到了")
+
+    let home = root.appendingPathComponent("codex")
+    let sessions = home.appendingPathComponent("sessions/2026/09/20")
+    try! fm.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let rollout = sessions.appendingPathComponent("rollout-r.jsonl")
+    try! (codexLine(at(20, 10), [(300, 21, at(20, 14))]) + "\n").write(to: rollout, atomically: true, encoding: .utf8)
+    let codex = CodexLogScanner(home: home)
+    check(codex.refresh(now: at(20, 13)).map(\.time) == [at(20, 10)], "Codex 日志：先读到旧文件")
+    let newRollout = sessions.appendingPathComponent("rollout-r.new")
+    try! (codexLine(at(20, 11), [(300, 34, at(20, 14))]) + "\n").write(to: newRollout, atomically: false, encoding: .utf8)
+    _ = try! fm.replaceItemAt(rollout, withItemAt: newRollout)
+    check(codex.refresh(now: at(20, 13)).map(\.time).contains(at(20, 11)), "Codex 日志：同名同长度的新文件里的读数也读到了")
+}
+
+do {  // LineCursor：同名文件被换掉、超长行、半行
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("quotapet-cursor-\(UUID().uuidString)")
+    try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("a.jsonl")
+    func size(_ u: URL) -> UInt64 { (try! FileManager.default.attributesOfItem(atPath: u.path)[.size] as! NSNumber).uint64Value }
+    func read(_ cursor: inout LineCursor, _ u: URL) -> [String] {
+        var lines: [String] = []
+        cursor.readAppended(from: u, size: size(u)) { lines.append(String(decoding: $0, as: UTF8.self)) }
+        return lines
+    }
+
+    // 普通追加、半行等补全
+    try! "aaaa\nbbbb\ncc".write(to: url, atomically: true, encoding: .utf8)
+    var cursor = LineCursor()
+    check(read(&cursor, url) == ["aaaa", "bbbb"], "半行先留着")
+    var h = try! FileHandle(forWritingTo: url); h.seekToEndOfFile(); h.write(Data("cc\ndddd\n".utf8)); try! h.close()
+    check(read(&cursor, url) == ["cccc", "dddd"], "半行补全后交出")
+    check(read(&cursor, url).isEmpty, "没有新内容不重复交")
+
+    // 先写临时文件再改名换掉原文件，长度正好一样：inode 变了，从头读
+    let same = dir.appendingPathComponent("b.jsonl")
+    try! "1111\n2222\n3333\n4444\n".write(to: same, atomically: true, encoding: .utf8)
+    var c2 = LineCursor()
+    check(read(&c2, same).count == 4, "先读完旧文件")
+    let tmpNew = dir.appendingPathComponent("b.new")
+    try! "wwww\nxxxx\nyyyy\nzzzz\n".write(to: tmpNew, atomically: false, encoding: .utf8)
+    _ = try! FileManager.default.replaceItemAt(same, withItemAt: tmpNew)
+    check(read(&c2, same) == ["wwww", "xxxx", "yyyy", "zzzz"], "同名同长度的新文件（改名换掉）从头读")
+
+    // 原地改写，inode 不变、长度不变，开头内容变了
+    let inplace = dir.appendingPathComponent("c.jsonl")
+    try! "1111\n2222\n3333\n".write(to: inplace, atomically: true, encoding: .utf8)
+    var c3 = LineCursor()
+    _ = read(&c3, inplace)
+    h = try! FileHandle(forWritingTo: inplace); h.write(Data("9999\n8888\n7777\n".utf8)); try! h.close()
+    check(read(&c3, inplace) == ["9999", "8888", "7777"], "原地改写同长度：开头内容变了就从头读")
+
+    // 从末尾往后跟（offset 非 0），文件被换掉
+    let tail = dir.appendingPathComponent("d.jsonl")
+    try! "old1\nold2\n".write(to: tail, atomically: true, encoding: .utf8)
+    var c4 = LineCursor(offset: size(tail), identityOf: tail)
+    check(read(&c4, tail).isEmpty, "从末尾往后跟：没有新内容")
+    let tmpTail = dir.appendingPathComponent("d.new")
+    try! "new1\nnew2\n".write(to: tmpTail, atomically: false, encoding: .utf8)
+    _ = try! FileManager.default.replaceItemAt(tail, withItemAt: tmpTail)
+    check(read(&c4, tail) == ["new1", "new2"], "从末尾往后跟的文件被换掉：从头读")
+
+    // 超长行：不无限攒，丢到下一处换行后恢复；还没写完的超长行也不攒
+    let big = dir.appendingPathComponent("e.jsonl")
+    try! "ok1\n".write(to: big, atomically: true, encoding: .utf8)
+    var c5 = LineCursor(maxLineLength: 16)
+    check(read(&c5, big) == ["ok1"], "超长行之前正常")
+    h = try! FileHandle(forWritingTo: big); h.seekToEndOfFile(); h.write(Data(String(repeating: "x", count: 100).utf8)); try! h.close()
+    check(read(&c5, big).isEmpty, "没写完的超长行不交")
+    h = try! FileHandle(forWritingTo: big); h.seekToEndOfFile(); h.write(Data((String(repeating: "y", count: 50) + "\nok2\nok3").utf8)); try! h.close()
+    check(read(&c5, big) == ["ok2"], "超长行丢到换行为止，之后恢复；末尾的半行等补全")
+    h = try! FileHandle(forWritingTo: big); h.seekToEndOfFile(); h.write(Data("\n".utf8)); try! h.close()
+    check(read(&c5, big) == ["ok3"], "恢复后的半行照常补全")
+    // 一整行超限一次读全：丢掉
+    let one = dir.appendingPathComponent("f.jsonl")
+    try! (String(repeating: "z", count: 40) + "\nok\n").write(to: one, atomically: true, encoding: .utf8)
+    var c6 = LineCursor(maxLineLength: 16)
+    check(read(&c6, one) == ["ok"], "一次读全的超长行丢掉，下一行正常")
+}
+
 check(ClaudeRates.starting.usdPerSessionPercent == 0.27 && ClaudeRates.starting.usdPerWeeklyPercent == 2.0,
       "起始换算率：5 小时 $0.27 / 1%，每周 $2.0 / 1%")
 /// 下面的估算测试用 $0.117 / 1%，数字好算
@@ -521,6 +631,33 @@ do {
     let midway = window([S(time: at(20, 10, 10), value: 40), S(time: at(20, 10, 25), value: 46)])
     check(near(midway.otherPercent, 6), "开始前没有 0 的读数（记录从窗口中间开始）：第一次读数之前的 40% 不算其他端：\(midway.otherPercent)")
     check(window(zero + Array(readings.prefix(2)), live: false).otherPercent == 0, "关掉实时估算时也不算其他端")
+    // 第 9 条：读数前一秒结束的请求（20 点），这次官方读数还没算上、下一次才涨 20 点：是迟到的本机用量，不是其他端的
+    let lateReq = [req(at(20, 10, 25).addingTimeInterval(-1), 20)]
+    let lateThenRise = [S(time: at(20, 10, 25), value: 10), S(time: at(20, 10, 40), value: 30)]
+    let lateSegments = OtherUsage.segments(start: at(20, 10), startValue: 10, readings: lateThenRise, requests: lateReq, percentOf: percentOf)
+    check(lateSegments.isEmpty, "迟入账的本机请求：下一次官方读数涨的 20 点抵给它，不算其他端：\(lateSegments)")
+    // 同样的读数，涨得比迟到的请求多：多出来的才是其他端
+    let lateAndMore = OtherUsage.segments(start: at(20, 10), startValue: 10, readings: [S(time: at(20, 10, 25), value: 10), S(time: at(20, 10, 40), value: 50)],
+                                          requests: lateReq, percentOf: percentOf)
+    check(lateAndMore.count == 1 && near(lateAndMore[0].percent, 20) && lateAndMore[0].start == at(20, 10, 25),
+          "涨了 40、其中 20 是迟到的本机用量：其他端 20：\(lateAndMore)")
+    // 一笔只抵一次：再下一段官方又涨 20、本机没有新请求，这 20 是其他端的
+    let onceOnly = OtherUsage.segments(start: at(20, 10), startValue: 10,
+                                       readings: lateThenRise + [S(time: at(20, 10, 55), value: 50)], requests: lateReq, percentOf: percentOf)
+    check(onceOnly.count == 1 && near(onceOnly[0].percent, 20) && onceOnly[0].start == at(20, 10, 40), "迟到的 20 点只抵一次：\(onceOnly)")
+    // 官方只算上了一部分：差的那部分带到下一段
+    let partial = OtherUsage.segments(start: at(20, 10), startValue: 10,
+                                      readings: [S(time: at(20, 10, 25), value: 15), S(time: at(20, 10, 40), value: 30)], requests: lateReq, percentOf: percentOf)
+    check(partial.isEmpty, "官方先涨 5、再涨 15：加起来正好是这个请求的 20：\(partial)")
+    // 请求不在读数前 5 分钟以内：不能指望服务器那么晚才算，不抵
+    let tooOld = OtherUsage.segments(start: at(20, 10), startValue: 10, readings: lateThenRise, requests: [req(at(20, 10, 25).addingTimeInterval(-600), 20)],
+                                     percentOf: percentOf)
+    check(tooOld.count == 1 && near(tooOld[0].percent, 20), "10 分钟前的请求不算迟入账：官方后来涨的是其他端：\(tooOld)")
+    // 官方读数当时就涨了：正常对上，不留 credit 给下一段
+    let ontime = OtherUsage.segments(start: at(20, 10), startValue: 10,
+                                     readings: [S(time: at(20, 10, 25), value: 30), S(time: at(20, 10, 40), value: 50)], requests: lateReq, percentOf: percentOf)
+    check(ontime.count == 1 && near(ontime[0].percent, 20) && ontime[0].start == at(20, 10, 25), "当时就算上了：后面涨的 20 是其他端：\(ontime)")
+
 }
 
 // MARK: - Codex 日志
@@ -659,17 +796,151 @@ do {  // 第一次扫描（刚启动）也要读到「现在 − 24 小时」之
     try? FileManager.default.removeItem(at: home)
 }
 
-// MARK: - 文件事件的刷新限频
+
+do {  // Codex：未来的读数、没有总额度时不拿个别模型的额度顶替
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("quotapet-codex-total-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    func home(_ name: String, _ lines: [String]) -> URL {
+        let h = root.appendingPathComponent(name)
+        let sessions = h.appendingPathComponent("sessions")
+        try! FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try! (lines.joined(separator: "\n") + "\n").write(to: sessions.appendingPathComponent("rollout.jsonl"), atomically: true, encoding: .utf8)
+        return h
+    }
+    // 第 6 条：当前有效读数 30%，一分钟后的读数 100%：现在不显示满；时间追上了才参与
+    let future = CodexProvider(home: home("future", [codexLine(at(20, 12), [(300, 30, at(20, 17)), (10080, 40, at(25, 9))]),
+                                                       codexLine(at(20, 14, 41), [(300, 100, at(20, 17)), (10080, 41, at(25, 9))])]))
+    let early = try! future.snapshot(now: at(20, 14, 40))
+    check(near(early.window("five_hour")?.percent, 30) && early.window("five_hour")?.official == 30 && early.officialAt == at(20, 12)
+          && near(early.window("seven_day")?.percent, 40), "Codex：未来一分钟的 100% 现在不算：\(String(describing: early.window("five_hour")))")
+    let caughtUp = try! future.snapshot(now: at(20, 14, 42))
+    check(near(caughtUp.window("five_hour")?.percent, 100) && caughtUp.officialAt == at(20, 14, 41), "时间追上之后：这条读数参与")
+
+    // 第 7 条：只有个别模型自己的额度（limit_id 不是 codex）：总额度缺数据，不拿它们顶替
+    let modelOnly = try! CodexProvider(home: home("model", [codexLine(at(20, 12), limit: "codex_bengalfox", [(300, 90, at(20, 17)), (10080, 70, at(25, 9))])]))
+        .snapshot(now: at(20, 13))
+    check(modelOnly.windows.isEmpty && !modelOnly.hasData && modelOnly.notes == [CodexProvider.mainMissingNote] && modelOnly.officialAt == nil,
+          "只有模型专属额度：没有窗口，说总额度缺数据：\(modelOnly.notes)")
+    // limit_id 写了、但是 null（认不出是哪个桶）：也不当成老格式的总额度
+    let nullID = CodexRateReading.parse(line: Data(codexLine(at(20, 12), limit: nil, [(300, 90, at(20, 17))]).utf8))
+    check(nullID?.limitID == "" && nullID?.isMain == false, "limit_id 是 null：不是总额度：\(String(describing: nullID?.limitID))")
+    check(try! CodexProvider(home: home("null", [codexLine(at(20, 12), limit: nil, [(300, 90, at(20, 17))])])).snapshot(now: at(20, 13)).windows.isEmpty,
+          "limit_id 是 null 的读数不顶替总额度")
+    // 总额度有读数：模型专属的 90% 不影响它
+    let mixed = try! CodexProvider(home: home("mixed", [codexLine(at(20, 12), [(300, 20, at(20, 17))]),
+                                                          codexLine(at(20, 12, 5), limit: "codex_bengalfox", [(300, 90, at(20, 17))])])).snapshot(now: at(20, 13))
+    check(near(mixed.window("five_hour")?.percent, 20) && mixed.hasData, "有总额度：用总额度，别的桶不影响")
+    // 老格式：确实没有 limit_id 这个字段：是总额度
+    let legacyStamp = ISO8601DateFormatter().string(from: at(20, 12))
+    let legacyLine = #"{"timestamp":"\#(legacyStamp)","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_in_seconds":3600}}}}"#
+    let legacyHome = try! CodexProvider(home: home("legacy", [legacyLine])).snapshot(now: at(20, 12, 30))
+    check(legacyHome.hasData && near(legacyHome.window("five_hour")?.percent, 12.5), "老格式（没有 limit_id 字段）：当总额度：\(legacyHome.windows.map(\.id))")
+    check(try! CodexProvider(home: home("none", [])).snapshot(now: at(20, 13)).notes == [CodexProvider.missingNote], "什么记录都没有：还是「没找到」")
+}
+
+// MARK: - 刷新排期（防抖、限频从真正开始算起、排队和重算）
 
 do {
-    var throttle = RefreshThrottle(minInterval: 5)
-    let t0 = at(20, 12)
-    check(near(throttle.delay(for: .claude, now: t0, debounce: 0.8), 0.8), "第一次文件变化：等防抖的 0.8 秒就算")
-    throttle.started(.claude, at: t0)
-    check(near(throttle.delay(for: .claude, now: t0 + 1, debounce: 0.8), 4), "上次开始算才过 1 秒：等到满 5 秒")
-    check(near(throttle.delay(for: .claude, now: t0 + 4.5, debounce: 0.8), 0.8), "快满 5 秒了：至少还是等防抖的 0.8 秒")
-    check(near(throttle.delay(for: .codex, now: t0 + 1, debounce: 0.8), 0.8), "每家分开算：Claude 刚算过不影响 Codex")
-    check(near(throttle.delay(for: .claude, now: t0 + 30, debounce: 0.8), 0.8), "隔了很久：不用多等")
+    let gate = RefreshGate(minInterval: 5, debounce: 0.8)
+    var t = 1000.0  // 假的单调时钟
+    func delay(_ s: RefreshGate.Schedule) -> Double? { if case .after(let d, _) = s { return d } else { return nil } }
+    func token(_ s: RefreshGate.Schedule) -> Int { if case .after(_, let k) = s { return k } else { return -1 } }
+    func sched(_ f: RefreshGate.Finish) -> RefreshGate.Schedule { if case .after(let d, let k) = f { return .after(d, token: k) } else { return .none } }
+
+    // 第一次文件变化：等防抖；连着来的不重复排
+    let first = gate.fileChanged(.claude, now: t)
+    check(near(delay(first), 0.8), "第一次文件变化：等防抖的 0.8 秒：\(first)")
+    check(gate.fileChanged(.claude, now: t + 0.1) == .none, "已经有定时器：不重复排")
+    check(gate.fileChanged(.codex, now: t) != .none, "每家分开排")
+    t += 0.8
+    check(gate.timerFired(.claude, token: token(first)), "到点：空闲，开始（记成排着队）")
+    check(gate.fileChanged(.claude, now: t + 0.5) == .none, "排着队、还没开始：文件变化不用管（开始算时会读到）")
+    check(!gate.timerFired(.claude, token: token(first)), "同一个定时器不会触发两次")
+
+    // 限频从后台队列真正开始算起：排队用了 3 秒，这 3 秒不算进那 5 秒
+    t += 3  // 队列上前面还有别的活，这时才轮到
+    gate.began(.claude, now: t)
+    let began1 = t
+    check(gate.fileChanged(.claude, now: t + 1) == .none, "正在算时文件又变了：先记下，不排定时器")
+    t += 2  // 算了 2 秒
+    let after = gate.finished(.claude, now: t)
+    check(near(delay(sched(after)), 5 - 2), "算完才排的：离真正开始 2 秒，还要等 3 秒（不是从排队时算）：\(after)")
+    t += 3
+    check(gate.timerFired(.claude, token: token(sched(after))), "满 5 秒到点")
+    gate.began(.claude, now: t)
+    check(t - began1 == 5, "两次真正开始刚好隔 5 秒")
+    check(gate.finished(.claude, now: t + 1) == .none, "这次算的时候没有新变化：不再排")
+
+    // 隔了很久：只等防抖
+    t += 60
+    check(near(delay(gate.fileChanged(.claude, now: t)), 0.8), "隔了很久：不用多等")
+    // 防抖定时器还没到点，一次立刻刷新（手动 / 兜底）先开始算了：定时器作废，不再多算一次
+    let stale = gate.fileChanged(.codex, now: t)  // codex 上一个定时器还在，所以是 none；先清掉
+    check(stale == .none, "codex 的定时器还在")
+    check(gate.request(.codex), "立刻刷新：空闲就马上排队，不受限频管")
+    gate.began(.codex, now: t + 1)
+    check(gate.finished(.codex, now: t + 2) == .none, "开始算时旧定时器作废，之后没有新变化：什么都不排")
+
+    // 立刻刷新遇到正在算的：算完马上再来一次（不受限频管）
+    check(gate.request(.codex), "空闲：排队")
+    gate.began(.codex, now: t + 3)
+    check(!gate.request(.codex), "正在算：记下再来一次")
+    check(!gate.request(.codex), "连着请求也只记一次")
+    check(gate.finished(.codex, now: t + 3.1) == .runNow, "算完马上再算（离上次开始才 0.1 秒也不等）")
+    gate.began(.codex, now: t + 3.2)
+    check(gate.finished(.codex, now: t + 3.3) == .none, "再算完就没有了")
+    // 排着队的时候又来立刻刷新：也是记再来一次（这次开始算时读不读得到改过的设置说不准）
+    check(gate.request(.claude), "claude 空闲，排队")
+    check(!gate.request(.claude), "排着队时又要立刻刷新：记再来一次")
+    gate.began(.claude, now: t + 10)
+    check(gate.finished(.claude, now: t + 11) == .runNow, "算完再来一次")
+    gate.began(.claude, now: t + 11)
+    _ = gate.finished(.claude, now: t + 12)
+
+    // 定时器到点时正在算（别的刷新抢先开始了）：不另外开始
+    let busy = RefreshGate()
+    let armed = busy.fileChanged(.claude, now: 0)
+    check(busy.request(.claude), "立刻刷新先排上了")
+    busy.began(.claude, now: 0.5)
+    check(!busy.timerFired(.claude, token: token(armed)), "开始算时定时器就作废了，到点也不开始")
+    check(busy.finished(.claude, now: 1) == .none, "没有重复的刷新")
+    // 全程只有同一家的状态互不影响
+    check(busy.fileChanged(.codex, now: 0) != .none, "另一家不受影响")
+}
+
+// MARK: - 文件事件的路由（FSEvents 标志）
+
+do {
+    final class StubProvider: UsageProvider, @unchecked Sendable {
+        let id: ProviderID
+        let watchPaths: [String]
+        let suffix: String
+        var pollInterval: TimeInterval { 60 }
+        init(_ id: ProviderID, _ path: String, suffix: String) { self.id = id; watchPaths = [path]; self.suffix = suffix }
+        func isRelevantChange(path: String) -> Bool { path.hasSuffix(suffix) }
+        func snapshot(now: Date) throws -> UsageSnapshot { fatalError("路由检查不会算快照") }
+    }
+    let claude = StubProvider(.claude, "/home/u/.claude/projects", suffix: ".jsonl")
+    let codex = StubProvider(.codex, "/home/u/.codex", suffix: ".jsonl")
+    let providers: [UsageProvider] = [claude, codex]
+    func affected(_ events: [FileEvent]) -> Set<ProviderID> { WatchRouting.providersAffected(by: events, providers: providers) }
+
+    check(FileEventFlags(rawValue: 0x1).needsRescan && FileEventFlags(rawValue: 0x2).needsRescan && FileEventFlags(rawValue: 0x4).needsRescan,
+          "MustScanSubDirs、UserDropped、KernelDropped 都要重新扫描")
+    check(FileEventFlags(rawValue: 0x20).needsRescan, "被监听的目录本身变了也要重新扫描")
+    check(!FileEventFlags(rawValue: 0x10000).needsRescan && !FileEventFlags([]).needsRescan, "普通的文件事件（ItemCreated/Modified 等）不用")
+
+    check(affected([FileEvent(path: "/home/u/.claude/projects/a/s.jsonl", flags: FileEventFlags(rawValue: 0x10000))]) == [.claude],
+          "普通事件：只算监听这个目录的那家")
+    check(affected([FileEvent(path: "/home/u/.claude/projects/a/notes.txt")]).isEmpty, "普通事件：这家不认的文件不算")
+    // 合并了的事件：路径是个目录，不看 isRelevantChange
+    check(affected([FileEvent(path: "/home/u/.codex/sessions/2026", flags: .mustScanSubDirs)]) == [.codex],
+          "MustScanSubDirs：目录下的文件不知道是哪个，那一家整个重算")
+    check(affected([FileEvent(path: "/home/u/.claude/projects", flags: .kernelDropped)]) == [.claude], "事件丢了：监听的目录本身也算")
+    check(affected([FileEvent(path: "/home/u", flags: .mustScanSubDirs)]) == [.claude, .codex], "上一级目录要重新扫描：下面有监听目录的几家都算")
+    check(affected([FileEvent(path: "/elsewhere/x", flags: .userDropped)]) == [.claude, .codex], "对不上任何一家的目录：所有家都算")
+    check(affected([FileEvent(path: "/elsewhere/x.jsonl")]) == [.claude, .codex], "普通事件对不上目录（软链接被展开）：交给所有认这个文件的")
+    check(affected([FileEvent(path: "/home/u/.claude/projects/a/s.jsonl"), FileEvent(path: "/home/u/.codex/x.jsonl")]) == [.claude, .codex], "一批事件合起来算")
 }
 
 // MARK: - 几家一起显示
@@ -844,6 +1115,55 @@ do {
     try! FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedURL.path)
     check(locked.merge([]) == 1 && IntervalArchive(url: lockedURL).intervals == [intervals[0]], "能写了再补上")
     try? FileManager.default.removeItem(at: dir)
+    // 第 8 条：只有的那段区间是混用的（本机花 $0.02、官方涨 20 个点）：挑完一个有效区间都没剩，换算率回到起始值，不是学到的 $0.0737
+    let lone = UsageInterval(start: at(25, 10), end: at(25, 10, 15), sessionFrom: 10, sessionTo: 30, weeklyFrom: nil, weeklyTo: nil, requests: 1,
+                             usd: 0.02, cacheReadUSD: 0, usdByGroup: ["opus/max": 0.02], outputTokens: 0, thinkingTokens: 0, priceBasis: ClaudePricing.basis)
+    let loneFit = RateLearner.learn([lone], delta: \.sessionDelta, prior: 0.27)
+    check(loneFit.intervals == 0 && loneFit.usdPerPercent == 0.27 && loneFit.latest == nil,
+          "全是混用的区间：0 段可用、换算率回到起始值：\(loneFit)")
+    var cleanOne = lone
+    cleanOne.usd = 5.4
+    cleanOne.cacheReadUSD = 0
+    cleanOne.sessionTo = 30  // 5.4 / 20 = 0.27，对得上
+    let mixedAndClean = RateLearner.learn([lone, { () -> UsageInterval in var o = cleanOne; o.start = at(25, 11); o.end = at(25, 11, 15); return o }()],
+                                          delta: \.sessionDelta, prior: 0.27)
+    check(mixedAndClean.intervals == 1 && near(mixedAndClean.usdPerPercent, 0.27, 0.05) && mixedAndClean.latest == at(25, 11, 15),
+          "混用的挑掉、干净的照学：\(mixedAndClean)")
+
+    // 第 10 条：区间跨过了确定的重置，那个窗口的官方增量不用来学；另一个没重置的窗口照常学
+    let a = sample(at(20, 14), 30, 40), b = sample(at(20, 14, 15), 33, 42)
+    let costly = [opus(at(20, 14, 5), usd: 4.0)]
+    let plainInterval = UsageInterval.extract(samples: [a, b], requests: costly, now: at(20, 15)).first!
+    check(plainInterval.sessionDelta == 3 && plainInterval.weeklyDelta == 2 && plainInterval.sessionCrossedReset == nil, "没有重置信息：照常")
+    let sessionCrossed = UsageInterval.extract(samples: [a, b], requests: costly, sessionResets: [at(20, 14, 10)], now: at(20, 15)).first!
+    check(sessionCrossed.sessionDelta == nil && sessionCrossed.weeklyDelta == 2 && sessionCrossed.sessionCrossedReset == true,
+          "5 小时窗口重置前 30%、重置后已经用到 33%：不能拿整段花费去除以 3，每周的增量还能用")
+    let weeklyCrossed = UsageInterval.extract(samples: [a, b], requests: costly, weeklyResetAnchors: [at(13, 14, 10)], now: at(20, 15)).first!
+    check(weeklyCrossed.weeklyDelta == nil && weeklyCrossed.sessionDelta == 3 && weeklyCrossed.weeklyCrossedReset == true,
+          "每周窗口按固定 168 小时循环：一周前的重置 + 7 × 24 小时正好落在这段里")
+    check(UsageInterval.extract(samples: [a, b], requests: costly, weeklyResetAnchors: [at(13, 15), at(20, 14)], now: at(20, 15)).first?.weeklyDelta == 2,
+          "重置不在这段里（在段后、或者正好在段开始的时刻）：不算跨过")
+    check(UsageInterval.extract(samples: [a, b], requests: costly, sessionResets: [at(20, 14, 15)], now: at(20, 15)).first?.sessionDelta == nil
+          && UsageInterval.extract(samples: [a, b], requests: costly, sessionResets: [at(20, 14)], now: at(20, 15)).first?.sessionDelta == 3,
+          "段 (开始, 结束]：重置在结束时刻算跨过，在开始时刻不算")
+    check(UsageInterval.crossesCycle(anchor: at(20, 9), period: week, after: at(27, 8, 50), upTo: at(27, 9, 10))
+          && !UsageInterval.crossesCycle(anchor: at(20, 9), period: week, after: at(26, 9), upTo: at(26, 9, 15)), "按周期往前往后推")
+    let crossedFit = RateLearner.learn([sessionCrossed], delta: \.sessionDelta, prior: 0.27)
+    let weeklyFit = RateLearner.learn([sessionCrossed], delta: \.weeklyDelta, prior: 2.0)
+    check(crossedFit.intervals == 0 && crossedFit.usdPerPercent == 0.27 && weeklyFit.intervals == 1,
+          "跨过 5 小时重置的区间：5 小时不学、每周照学：\(crossedFit) \(weeklyFit)")
+    // 记录是只追加的：后来才知道跨过了重置，旧记录要补上标记（读回来时同一段以后面那行为准）
+    let flagDir = dir.appendingPathComponent("flags")
+    let flagArchive = IntervalArchive(url: flagDir.appendingPathComponent("intervals.jsonl"))
+    flagArchive.merge([plainInterval])
+    check(flagArchive.intervals.first?.sessionDelta == 3, "先记下没标记的")
+    flagArchive.merge([sessionCrossed])
+    check(flagArchive.intervals.count == 1 && flagArchive.intervals.first?.sessionDelta == nil && flagArchive.intervals.first?.weeklyDelta == 2,
+          "补上标记")
+    check(IntervalArchive(url: flagDir.appendingPathComponent("intervals.jsonl")).intervals.first?.sessionCrossedReset == true, "重新读文件也是标过的")
+    flagArchive.merge([plainInterval])
+    check(flagArchive.intervals.first?.sessionCrossedReset == true, "没标记的新切片不会把标记冲掉")
+
 }
 
 // MARK: - 命令行读数
@@ -885,6 +1205,24 @@ do {
     // 同一条里有明显是百分比的数：整条都已经是百分比（命令行改了格式），小的数也不乘 100
     let percents = ClaudeCLIReadings.parse(unified(five: 1.5, sevenDay: 40, fiveReset: fiveReset, weekReset: weekReset), org: nil, now: now)
     check(near(percents?.session, 1.5) && near(percents?.weekly, 40), "整条是百分比：\(String(describing: percents))")
+
+    // 官方给的是 0.9996：保留原始精度，不能舍入成 100%（只有原始值到 100 或限流消息才算用完）
+    let almost = ClaudeCLIReadings.parse(unified(five: 0.9996, sevenDay: 0.99999, fiveReset: fiveReset, weekReset: weekReset, status: "allowed"),
+                                         org: nil, now: now)
+    check(near(almost?.session, 99.96) && near(almost?.weekly, 99.999) && (almost?.session ?? 100) < 100 && (almost?.weekly ?? 100) < 100,
+          "0.9996 是 99.96%，不是 100%：\(String(describing: almost))")
+    check(Fmt.percent(almost?.session ?? 0) == "99%" && Fmt.percent(almost?.weekly ?? 0) == "99%", "显示时才舍入，没到 100 的显示成 99%")
+    check(near(ClaudeCLIReadings.parse(unified(five: 0.995, sevenDay: 0.5, fiveReset: fiveReset, weekReset: weekReset), org: nil, now: now)?.session, 99.5)
+          && near(ClaudeCLIReadings.parse(unified(five: 1.0, sevenDay: 0.5, fiveReset: fiveReset, weekReset: weekReset), org: nil, now: now)?.session, 100),
+          "0.995 还是 99.5；1.0 才是 100")
+    check(near(ClaudeCLIReadings.parse(unified(five: 0.57, sevenDay: 0.07, fiveReset: fiveReset, weekReset: weekReset), org: nil, now: now)?.session, 57, 1e-9),
+          "只去掉乘 100 的浮点误差")
+    let almostPercentFormat = ClaudeCLIReadings.parse(unified(five: 99.96, sevenDay: 3, fiveReset: fiveReset, weekReset: weekReset), org: nil, now: now)
+    check(near(almostPercentFormat?.session, 99.96), "直接给百分比的格式：99.96 也不舍入成 100")
+    for ratio in [0.9999999999999, 0.99999999999999] {
+        let edge = ClaudeCLIReadings.parse(unified(five: ratio, sevenDay: 0.1, fiveReset: fiveReset, weekReset: weekReset), org: nil, now: now)
+        check((edge?.session ?? 100) < 100, "原始值小于 1 的，结果永远小于 100：\(ratio)")
+    }
 
     // 认不出来的退回估算，不抛错
     check(ClaudeCLIReadings.parse("", org: nil, now: now) == nil, "空输出")
@@ -981,13 +1319,41 @@ do {
           && P.shouldProbeManually(now: now, lastAttempt: now.addingTimeInterval(-40)), "手动刷新只防连点")
 
     let scriptBin = URL(fileURLWithPath: "/a b/it's/claude")
-    let loginOnly = ClaudeCLI.loginScript(scriptBin, logoutFirst: false)
-    let relogin = ClaudeCLI.loginScript(scriptBin, logoutFirst: true)
+    let scriptEnv = ["HOME": "/Users/x", "CLAUDE_CONFIG_DIR": "/cfg dir/it's", "PATH": "/usr/bin:/bin"]
+    let loginOnly = ClaudeCLI.loginScript(scriptBin, logoutFirst: false, environment: scriptEnv)
+    let relogin = ClaudeCLI.loginScript(scriptBin, logoutFirst: true, environment: scriptEnv)
     let quotedBin = "'/a b/it'\\''s/claude'"
-    check(loginOnly.hasPrefix("#!/bin/zsh\n") && loginOnly.contains("\n" + quotedBin + " auth login\n") && !loginOnly.contains("auth logout"),
+    check(loginOnly.hasPrefix("#!/bin/zsh\n") && loginOnly.contains(" " + quotedBin + " auth login\n") && !loginOnly.contains("auth logout"),
           "登录脚本只登录，路径加引号")
-    check(relogin.contains(quotedBin + " auth logout\n" + quotedBin + " auth login"), "账号不对：先退出再登录")
+    check(relogin.contains(" " + quotedBin + " auth logout\n") && relogin.contains(" " + quotedBin + " auth login\n")
+          && relogin.range(of: "auth logout")!.lowerBound < relogin.range(of: "auth login")!.lowerBound, "账号不对：先退出再登录")
     check(!loginOnly.contains("\"\"") && loginOnly.filter({ $0 == "\"" }).count == 4, "脚本里的提示文字用双引号包好，文字里不能再有双引号")
+    // 登录和探测用同一份配置：脚本用 env -i 交出探测的那份最小环境，终端里 shell 配置带来的变量不会混进去
+    check(loginOnly.contains("/usr/bin/env -i CLAUDE_CONFIG_DIR='/cfg dir/it'\\''s' HOME='/Users/x' PATH='/usr/bin:/bin' TERM=${TERM:-xterm-256color} "),
+          "登录脚本带着和探测一样的 CLAUDE_CONFIG_DIR，路径转义：\(loginOnly)")
+    check(!loginOnly.contains("ANTHROPIC") && relogin.components(separatedBy: "/usr/bin/env -i").count == 3, "logout 和 login 都用最小环境")
+    let noConfigDir = ClaudeCLI.loginScript(scriptBin, logoutFirst: false, environment: ClaudeCLI.probeEnvironment(from: ["HOME": "/Users/x"]))
+    check(!noConfigDir.contains("CLAUDE_CONFIG_DIR"), "探测没有指定配置目录：脚本也不指定（终端里的 CLAUDE_CONFIG_DIR 不会带进来）")
+
+    // 登录脚本放进自己的私有目录：目录和脚本都是 0700，每次一个新目录，只删自己的目录
+    let loginBase = dir.appendingPathComponent("login-base")
+    try! FileManager.default.createDirectory(at: loginBase, withIntermediateDirectories: true)
+    let scriptA = try! ClaudeCLI.writeLoginScript(loginOnly, under: loginBase)
+    let scriptB = try! ClaudeCLI.writeLoginScript(relogin, under: loginBase)
+    func mode(_ url: URL) -> Int { ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int) ?? -1 }
+    check(scriptA.deletingLastPathComponent() != scriptB.deletingLastPathComponent() && scriptA.deletingLastPathComponent().deletingLastPathComponent().path == loginBase.path,
+          "每次一个新的私有目录")
+    check(mode(scriptA) == 0o700 && mode(scriptA.deletingLastPathComponent()) == 0o700, "脚本和目录都是 0700：\(mode(scriptA)) \(mode(scriptA.deletingLastPathComponent()))")
+    check((try? String(contentsOf: scriptA, encoding: .utf8)) == loginOnly, "脚本内容原样")
+    let strangerDir = loginBase.appendingPathComponent("not-ours")
+    try! FileManager.default.createDirectory(at: strangerDir, withIntermediateDirectories: true)
+    let stranger = strangerDir.appendingPathComponent("login.command")
+    FileManager.default.createFile(atPath: stranger.path, contents: Data())
+    ClaudeCLI.removeLoginScript(stranger)
+    ClaudeCLI.removeLoginScript(scriptA)
+    check(FileManager.default.fileExists(atPath: stranger.path), "名字对不上的目录不删")
+    check(!FileManager.default.fileExists(atPath: scriptA.deletingLastPathComponent().path)
+          && FileManager.default.fileExists(atPath: scriptB.path), "删掉自己的目录，别的不动")
 
     // 桌面端读数停了时面板怎么说：命令行没登录、找不到时，不能还说「会补查」
     typealias H = StalledOfficialHint
@@ -1000,8 +1366,153 @@ do {
           && H.of(cliProbe: true, status: .wrongAccount, claudeRunning: true) == .cliNeedsLogin, "命令行没登录或账号不对：说补查不了")
     check(H.of(cliProbe: true, status: .notFound, claudeRunning: true) == .cliNotFound
           && H.of(cliProbe: true, status: .failed(at: at(20, 12)), claudeRunning: true) == .cliRetrying, "找不到命令行、上次没成功各有说法")
-    check(![H.cliFillsIn, .cliRetrying, .cliNeedsLogin, .cliNotFound, .refreshDesktop, .openDesktop].contains(where: { $0.text.isEmpty }),
+    check(H.of(cliProbe: true, status: .blocked(.cliTooOld), claudeRunning: true) == .cliBlocked
+          && H.of(cliProbe: true, status: .blocked(.managedSettings), claudeRunning: false) == .cliBlocked
+          && H.of(cliProbe: true, status: .blocked(.otherProvider), claudeRunning: true) == .cliBlocked, "补查因安全前提被拦：说补查暂停了，不说「会补查」")
+    check(![H.cliFillsIn, .cliRetrying, .cliNeedsLogin, .cliNotFound, .cliBlocked, .refreshDesktop, .openDesktop].contains(where: { $0.text.isEmpty }),
           "每种说法都有字")
+
+    // 补查的安全前提：假的命令执行器，全程不联网、不跑真的命令行
+    final class FakeCLI: CLICommandExecutor, @unchecked Sendable {
+        struct Call { var arguments: [String]; var environment: [String: String] }
+        var calls: [Call] = []
+        var auth: String?
+        var help: String?
+        var request: CLICommandOutput?
+        /// 某个命令被执行时顺带做的事（比如在请求发出时关掉开关）
+        var onCommand: (([String]) -> Void)?
+        func execute(_ binary: URL, _ arguments: [String], environment: [String: String], directory: URL,
+                     timeout: TimeInterval, cancellation: CLIProbeCancellation) -> CLICommandOutput? {
+            calls.append(Call(arguments: arguments, environment: environment))
+            onCommand?(arguments)
+            if arguments == ["auth", "status", "--json"] { return auth.map { CLICommandOutput(exitCode: 0, stdout: Data($0.utf8)) } }
+            if arguments == ["--help"] { return help.map { CLICommandOutput(exitCode: 0, stdout: Data($0.utf8)) } }
+            return request
+        }
+        var requests: [Call] { calls.filter { $0.arguments.first == "-p" } }
+        var helpCalls: Int { calls.filter { $0.arguments == ["--help"] }.count }
+    }
+    let fullHelp = "Options:\n  --safe-mode  x\n  --setting-sources <s>  x\n  --strict-mcp-config  x\n  --disable-slash-commands  x\n"
+    func authJSON(org: String = "A", method: String = "claude.ai", provider: String? = "firstParty", loggedIn: Bool = true) -> String {
+        let providerField = provider.map { #","apiProvider":"\#($0)""# } ?? ""
+        return #"{"loggedIn":\#(loggedIn),"authMethod":"\#(method)","orgId":"\#(org)"\#(providerField)}"#
+    }
+    let probeNow = at(20, 14, 40)
+    let probeOutput = CLICommandOutput(exitCode: 0, stdout: Data(unified(five: 0.09, sevenDay: 0.06, fiveReset: at(20, 17), weekReset: at(25, 10)).utf8))
+    func fake(auth: String? = authJSON(), help: String? = fullHelp, request: CLICommandOutput? = probeOutput) -> FakeCLI {
+        let f = FakeCLI()
+        f.auth = auth
+        f.help = help
+        f.request = request
+        return f
+    }
+    func probe(_ f: FakeCLI, environment: [String: String] = ["HOME": "/Users/x"], managed: [String] = [], org: String? = "A",
+               cancellation: CLIProbeCancellation = CLIProbeCancellation(), binary: URL? = URL(fileURLWithPath: "/fake/claude"),
+               prober existing: ClaudeCLIProber? = nil)
+        -> (status: ClaudeCLIProbeStatus?, archive: CLIReadingArchive) {
+        let archive = CLIReadingArchive(url: dir.appendingPathComponent("probe-\(UUID().uuidString)/cli-readings.jsonl"))
+        let prober = existing ?? ClaudeCLIProber(executor: f, environment: { environment }, managedSettingsPaths: managed, clock: { probeNow })
+        return (prober.run(binary: binary, archive: archive, expectedOrg: org, cancellation: cancellation), archive)
+    }
+
+    // 第 1 条：子进程只拿最小环境，自定义网关、API Key、第三方云开关都不传；同一份配置目录原样传下去
+    let hostEnvironment = ["ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_API_KEY": "k", "ANTHROPIC_AUTH_TOKEN": "t",
+                           "ANTHROPIC_CUSTOM_HEADERS": "x: y", "ANTHROPIC_FOUNDRY_BASE_URL": "https://f", "CLAUDE_CODE_USE_BEDROCK": "1",
+                           "CLAUDE_CODE_USE_VERTEX": "1", "CLAUDE_CODE_SKIP_AUTH": "1", "CLAUDE_CONFIG_DIR": "/cfg", "HOME": "/Users/x",
+                           "HTTPS_PROXY": "http://proxy:3128", "PATH": "/evil/bin", "FOO": "bar", "LANG": "en_US.UTF-8", "TMPDIR": ""]
+    let minimal = ClaudeCLI.probeEnvironment(from: hostEnvironment)
+    check(minimal == ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/x", "CLAUDE_CONFIG_DIR": "/cfg", "HTTPS_PROXY": "http://proxy:3128",
+                      "LANG": "en_US.UTF-8"], "最小环境：只放行必需的、配置目录和代理：\(minimal)")
+    let envFake = fake()
+    let okRun = probe(envFake, environment: hostEnvironment)
+    check(okRun.status == .ok(at: probeNow), "三个前提都满足：补查成功：\(String(describing: okRun.status))")
+    check(envFake.calls.count == 3 && envFake.calls.allSatisfy { $0.environment == minimal }
+          && !envFake.calls.contains { $0.environment.keys.contains { $0.hasPrefix("ANTHROPIC") || $0.hasPrefix("CLAUDE_CODE") } },
+          "auth status、--help、请求都在最小环境里跑，没有 ANTHROPIC_*、CLAUDE_CODE_*")
+    let sent = envFake.requests.first?.arguments ?? []
+    check(sent == ClaudeCLI.probeArguments(disableSlashCommands: true) && sent.contains("--safe-mode") && sent.contains("--strict-mcp-config")
+          && sent.starts(with: ["-p", "ok"]) && zip(sent, sent.dropFirst()).contains { $0 == "--setting-sources" && $1 == "local" }
+          && zip(sent, sent.dropFirst()).contains { $0 == "--tools" && $1 == "" }, "请求带着隔离参数：\(sent)")
+    check(okRun.archive.readings(now: probeNow).count == 1 && near(okRun.archive.readings(now: probeNow).first?.session, 9), "读数存进了记录")
+    check(!ClaudeCLI.probeArguments(disableSlashCommands: false).contains("--disable-slash-commands"), "不认的可选参数不加")
+
+    // 第 1 条：官方通道确认不了就停：报告里不是 firstParty、没有这个字段，都不发请求
+    for provider in ["bedrock", "gateway", nil] as [String?] {
+        let f = fake(auth: authJSON(provider: provider))
+        let run = probe(f)
+        check(run.status == .blocked(.otherProvider) && f.calls.count == 1 && f.requests.isEmpty && run.archive.readings(now: probeNow).isEmpty,
+              "apiProvider 是 \(provider ?? "（没有）")：停止补查、不发请求")
+    }
+    let keyAuth = fake(auth: authJSON(method: "api_key"))
+    check(probe(keyAuth).status == .notLoggedIn && keyAuth.requests.isEmpty, "API Key 登录：不查")
+    let loggedOut = fake(auth: authJSON(loggedIn: false))
+    check(probe(loggedOut).status == .notLoggedIn && loggedOut.calls.count == 1, "没登录：只看了登录状态")
+    let wrong = fake(auth: authJSON(org: "B"))
+    check(probe(wrong).status == .wrongAccount && wrong.requests.isEmpty, "账号和桌面端不一致：不查")
+    check(probe(fake(auth: nil)).status == .failed(at: probeNow), "auth status 没跑起来：失败（不发请求）")
+    check(probe(fake(), binary: nil).status == .notFound, "没找到命令行")
+
+    // 第 2 条：隔离参数缺了、--help 没回答，都不发请求
+    for (name, help) in [("没有 --safe-mode", "--setting-sources --strict-mcp-config"), ("没有 --setting-sources", "--safe-mode --strict-mcp-config"),
+                         ("没有 --strict-mcp-config", "--safe-mode --setting-sources"), ("--help 是空的", "")] {
+        let f = fake(help: help)
+        let run = probe(f)
+        check(run.status == .blocked(.cliTooOld) && f.requests.isEmpty && run.archive.readings(now: probeNow).isEmpty, "旧版命令行（\(name)）：不查")
+    }
+    let noHelp = fake(help: nil)
+    let noHelpRun = probe(noHelp)
+    check(noHelpRun.status == .failed(at: probeNow) && noHelp.requests.isEmpty, "--help 超时：不发请求，之后重试")
+    let optional = fake(help: "--safe-mode --setting-sources --strict-mcp-config")
+    _ = probe(optional)
+    check(optional.requests.first?.arguments == ClaudeCLI.probeArguments(disableSlashCommands: false), "没有 --disable-slash-commands 也能查，只是不加这个参数")
+    // 每个命令行只问一次 --help；问不到的不记
+    let cached = fake()
+    let sharedProber = ClaudeCLIProber(executor: cached, environment: { ["HOME": "/h"] }, managedSettingsPaths: [], clock: { probeNow })
+    _ = probe(cached, prober: sharedProber)
+    _ = probe(cached, prober: sharedProber)
+    check(cached.helpCalls == 1 && cached.requests.count == 2, "--help 只问一次：\(cached.helpCalls)")
+    let helpLater = fake(help: nil)
+    let laterProber = ClaudeCLIProber(executor: helpLater, environment: { ["HOME": "/h"] }, managedSettingsPaths: [], clock: { probeNow })
+    _ = probe(helpLater, prober: laterProber)
+    helpLater.help = fullHelp
+    check(probe(helpLater, prober: laterProber).status == .ok(at: probeNow) && helpLater.helpCalls == 2, "--help 这次没回答不算不支持，下次问得到就查")
+    // 请求本身失败：退出码不是 0、输出认不出来、没跑起来
+    for (name, output) in [("退出码不是 0", CLICommandOutput(exitCode: 1, stdout: probeOutput.stdout)), ("认不出的输出", CLICommandOutput(exitCode: 0, stdout: Data("hi".utf8))),
+                           ("没跑起来", nil)] as [(String, CLICommandOutput?)] {
+        let run = probe(fake(request: output))
+        check(run.status == .failed(at: probeNow) && run.archive.readings(now: probeNow).isEmpty, "请求失败（\(name)）：不存读数")
+    }
+    // 管理员配置：不能被隔离参数跳过，也读不懂它改了什么：不查（一条命令都不跑）
+    let managedFile = dir.appendingPathComponent("managed-settings.json")
+    FileManager.default.createFile(atPath: managedFile.path, contents: Data("{}".utf8))
+    let managedDir = dir.appendingPathComponent("managed-settings.d")
+    try! FileManager.default.createDirectory(at: managedDir, withIntermediateDirectories: true)
+    let managedFake = fake()
+    check(probe(managedFake, managed: [managedFile.path]).status == .blocked(.managedSettings) && managedFake.calls.isEmpty, "有管理员配置文件：不查")
+    check(!ClaudeCLI.hasManagedSettings(at: [managedDir.path, dir.appendingPathComponent("none").path]), "空的 managed-settings.d 和不存在的路径不算")
+    FileManager.default.createFile(atPath: managedDir.appendingPathComponent("10-gateway.json").path, contents: Data("{}".utf8))
+    check(ClaudeCLI.hasManagedSettings(at: [managedDir.path]), "managed-settings.d 里有文件才算")
+
+    // 第 3 条：开关关掉（取消令牌）之后，在途的任务不再往下走：不发请求、不存结果
+    let cancelledFirst = CLIProbeCancellation()
+    cancelledFirst.cancel()
+    let neverStarted = fake()
+    let neverRun = probe(neverStarted, cancellation: cancelledFirst)
+    check(neverRun.status == nil && neverStarted.calls.isEmpty, "开始前就取消了：一条命令都不跑")
+    for stage in ["auth", "--help", "-p"] {
+        let token = CLIProbeCancellation()
+        let f = fake()
+        f.onCommand = { arguments in if arguments.first == stage { token.cancel() } }
+        let run = probe(f, cancellation: token)
+        let expectedCalls = stage == "auth" ? 1 : (stage == "--help" ? 2 : 3)
+        check(run.status == nil && f.calls.count == expectedCalls && f.requests.count == (stage == "-p" ? 1 : 0)
+              && run.archive.readings(now: probeNow).isEmpty && !FileManager.default.fileExists(atPath: run.archive.url.path),
+              "在「\(stage)」之后取消：后面的命令不跑，请求之后取消也不存结果：\(f.calls.map(\.arguments))")
+    }
+    let guardToken = CLIProbeCancellation()
+    check(guardToken.performIfActive { 1 } == 1, "没取消：照常执行")
+    guardToken.cancel()
+    check(guardToken.performIfActive { 1 } == nil && guardToken.isCancelled, "取消之后：不再执行")
 
     // 接进 ClaudeProvider：命令行的读数当官方读数用，官方给的重置时间当窗口的开始和结束
     /// 返回提供者本身时（provider），可以用同一个再算一次
@@ -1058,6 +1569,76 @@ do {
                                  scale: 1, percentOf: { _ in 0 }, resetAnchor: nil, officialReset: at(20, 19), limits: [limitHit],
                                  live: true, now: at(20, 14, 50))
     check(both.resetsAt == at(20, 18), "限流中：限流消息给的恢复时间比命令行读数里的优先：\(String(describing: both.resetsAt))")
+
+    // 官方读数 99.96（命令行读数，没到 100）：显示成 99%，本机再多的用量也只到 99，不判满、不让宠物睡着
+    let nearFull = snapshot(cli: [CLIReading(time: at(20, 14, 30), org: "A", session: 99.96, weekly: 99.4, sessionResetsAt: at(20, 17), weeklyResetsAt: at(25, 10))],
+                            desktop: base, now: at(20, 14, 40))
+    let nearFullWindow = nearFull.window("five_hour")
+    check(near(nearFullWindow?.official, 99.96) && (nearFullWindow?.percent ?? 100) < 100 && nearFullWindow?.limitReported == false
+          && !nearFull.windows.contains { $0.percent >= 100 }, "官方读数 99.96：不判满：\(String(describing: nearFullWindow))")
+    let heavyUse = ClaudeRequest(id: "big", time: at(20, 14, 35), family: .opus, tokens: TokenCounts(output: 1_000_000))
+    let capped = noCLI.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: [S(time: at(20, 14, 30), value: 99.96)], requests: [heavyUse],
+                                   scale: 1, percentOf: { _ in 5 }, resetAnchor: nil, officialReset: at(20, 17), live: true, now: at(20, 14, 40))
+    check(near(capped.official, 99.96) && near(capped.percent, 99) && Fmt.percent(capped.percent) == "99%", "官方没到 100，本机估算最多 99%：\(capped.percent)")
+    var cappedSnapshot = UsageSnapshot(provider: .claude, windows: [capped], generatedAt: at(20, 14, 40), lastActiveAt: at(20, 14, 40))
+    cappedSnapshot.windows[0].burnPerHour = 900
+    check(PetStatus.of(cappedSnapshot, now: at(20, 14, 40)).mood == .exhausted, "99.96% 加上烧得再快：最多「快撑不住」，不睡")
+    let official100 = noCLI.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: [S(time: at(20, 14, 30), value: 100)], requests: [],
+                                        scale: 1, percentOf: { _ in 0 }, resetAnchor: nil, officialReset: at(20, 17), live: true, now: at(20, 14, 40))
+    check(near(official100.percent, 100) && official100.official == 100, "原始官方值到 100：才算用完")
+
+    // 已知的精确重置（官方给的重置时间、限流消息）在没有本机请求时也生效：重置之后，之前的 100% 读数不再算
+    let resetBuilt = noCLI.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: [S(time: at(20, 14, 30), value: 100)], requests: [],
+                                       scale: 1, percentOf: { _ in 0 }, resetAnchor: nil, officialReset: at(20, 15), live: true, now: at(20, 15, 1))
+    check(resetBuilt.percent == 0 && resetBuilt.official == nil && resetBuilt.officialAt == nil && resetBuilt.startedAt == nil && resetBuilt.resetsAt == nil,
+          "官方重置时间 15:00、没有任何本机请求，15:01：percent == 0、official == nil：\(resetBuilt)")
+    let limitReset = ClaudeLimitEvent(time: at(20, 14, 30), window: "five_hour", resetsAt: at(20, 15))
+    let limitBuilt = noCLI.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: [S(time: at(20, 14, 30), value: 100)], requests: [],
+                                       scale: 1, percentOf: { _ in 0 }, resetAnchor: nil, limits: [limitReset], live: true, now: at(20, 15, 1))
+    check(limitBuilt.percent == 0 && limitBuilt.official == nil, "限流消息给的恢复时间过了、没有本机请求：旧的 100% 不再算：\(limitBuilt)")
+    let beforeReset = noCLI.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: [S(time: at(20, 14, 30), value: 100)], requests: [],
+                                        scale: 1, percentOf: { _ in 0 }, resetAnchor: nil, officialReset: at(20, 15), live: true, now: at(20, 14, 50))
+    check(beforeReset.official == 100 && beforeReset.resetsAt == at(20, 15), "重置之前：读数还有效")
+    let afterReset = noCLI.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: [S(time: at(20, 14, 30), value: 100), S(time: at(20, 15, 10), value: 4)],
+                                       requests: [], scale: 1, percentOf: { _ in 0 }, resetAnchor: nil, officialReset: at(20, 15), live: true, now: at(20, 15, 20))
+    check(afterReset.official == 4 && afterReset.percent == 4, "重置之后的新读数照常用")
+    let weeklyReset = noCLI.buildWindow(id: "seven_day", title: "", duration: week, series: [S(time: at(20, 14, 30), value: 100)], requests: [],
+                                        scale: 1, percentOf: { _ in 0 }, resetAnchor: nil, officialReset: at(20, 15), fixedCadence: true,
+                                        live: true, now: at(20, 15, 1))
+    check(weeklyReset.percent == 0 && weeklyReset.official == nil, "每周窗口：官方给的重置时间过了、没有本机请求：percent == 0、official == nil")
+    let inferred = WindowInference.infer(samples: [UsageSample(time: at(20, 14, 30), value: 100)], activity: [], duration: fiveHours, now: at(20, 15, 1),
+                                         knownResets: [at(20, 15)])
+    check(inferred.current == nil && inferred.lastReset == at(20, 15), "WindowInference：没有使用也记下精确重置：\(inferred)")
+    let inferredLater = WindowInference.infer(samples: [UsageSample(time: at(20, 14, 30), value: 100)], activity: [at(20, 15, 30)], duration: fiveHours,
+                                              now: at(20, 16), knownResets: [at(20, 15)])
+    check(inferredLater.current?.start == at(20, 15, 30) && inferredLater.lastReset == at(20, 15), "重置之后又开始用：窗口从第一次使用算，重置时间照记")
+
+
+    // 第 6 条：时间戳在未来的读数（时钟偏差）不能被选成「最新读数」，等时间追上了再参与
+    let futureHistory = makeProvider(cli: [], desktop: [desk(at(20, 12), 30, 40), desk(at(20, 14, 41), 100, 100)], now: at(20, 14, 40))
+    let futureEarly = try! futureHistory.snapshot(now: at(20, 14, 40))
+    check(near(futureEarly.window("five_hour")?.official, 30) && futureEarly.officialAt == at(20, 12) && (futureEarly.window("five_hour")?.percent ?? 100) < 100
+          && (futureEarly.window("seven_day")?.percent ?? 100) < 100,
+          "当前有效读数 30%、一分钟后的读数 100%：现在不显示满：\(String(describing: futureEarly.window("five_hour")))")
+    let futureLater = try! futureHistory.snapshot(now: at(20, 14, 42))
+    check(futureLater.window("five_hour")?.official == 100 && futureLater.officialAt == at(20, 14, 41), "时间追上之后（文件没变，缓存里还在）：这条读数参与了")
+    // 组织要在按时间筛过之后再定：未来的、别的账号的读数不能把真正的账号挤掉
+    let futureOrg = makeProvider(cli: [], desktop: [desk(at(20, 12), 30, 40), desk(at(20, 14, 42), 5, 5, org: "B")], now: at(20, 14, 40))
+    let futureOrgEarly = try! futureOrg.snapshot(now: at(20, 14, 40))
+    check(futureOrg.desktopOrg == "A" && near(futureOrgEarly.window("five_hour")?.official, 30), "未来的别的组织的读数：现在还是 A 的读数：\(String(describing: futureOrg.desktopOrg))")
+    _ = try! futureOrg.snapshot(now: at(20, 14, 43))
+    check(futureOrg.desktopOrg == "B", "时间追上之后，最近的读数是 B 的，才换成 B")
+    check(ClaudeDesktopHistory.current([desk(at(20, 12), 30, 40), desk(at(20, 14, 41), 100, 100, org: "B")], now: at(20, 14, 40)).map(\.org) == ["A"], "current：先筛时间、再定组织")
+    let futureCLI = makeProvider(cli: [CLIReading(time: at(20, 14, 41), org: "A", session: 100, weekly: 100, sessionResetsAt: at(20, 19), weeklyResetsAt: at(26, 10))],
+                                 desktop: base, now: at(20, 14, 40))
+    let cliEarly = try! futureCLI.snapshot(now: at(20, 14, 40))
+    check(near(cliEarly.window("five_hour")?.official, 30) && cliEarly.window("seven_day")?.resetsAt != at(26, 10) && cliEarly.window("five_hour")?.resetsAt != at(20, 19)
+          && cliEarly.officialAt == at(20, 12), "未来的命令行读数：读数和重置时间都先不用：\(String(describing: cliEarly.window("five_hour")))")
+    let cliLater = try! futureCLI.snapshot(now: at(20, 14, 50))
+    check(cliLater.window("five_hour")?.official == 100 && cliLater.window("seven_day")?.resetsAt == at(26, 10), "追上之后参与：读数和重置时间都用上")
+    let futureSeries = noCLI.buildWindow(id: "five_hour", title: "", duration: fiveHours, series: [S(time: at(20, 12), value: 30), S(time: at(20, 14, 41), value: 100)],
+                                         requests: [], scale: 1, percentOf: { _ in 0 }, resetAnchor: nil, live: true, now: at(20, 14, 40))
+    check(futureSeries.official == 30 && futureSeries.officialAt == at(20, 12), "buildWindow 自己也不选未来的读数")
     var off = ClaudeProvider.Config()
     off.useCLIReadings = false
     let disabled = snapshot(cli: [reading], desktop: base, now: at(20, 14, 40), config: off)
@@ -1177,7 +1758,7 @@ do {
     r = UsageAlerts.evaluate(session(88, burn: 48), state: r.state, options: options, now: at(25, 12, 35))
     check(r.alerts.isEmpty, "同一个周期只预警一次：\(r.alerts)")
     r = UsageAlerts.evaluate(session(92, burn: 32), state: r.state, options: options, now: at(25, 12, 40))
-    check(r.alerts == [.threshold(90, runsOutAt: at(25, 12, 55))], "预警过也照常提醒阈值：\(r.alerts)")
+    check(r.alerts == [.threshold(90, runsOutAt: nil)], "预警过也照常提醒阈值，但不再重复说几点用完（每周期只说一次）：\(r.alerts)")
     r = UsageAlerts.evaluate(session(0, burn: nil), state: r.state, options: options, now: at(25, 15, 5))
     check(r.alerts == [.reset] && r.state.notified.isEmpty && !r.state.warned && r.state.last == 0,
           "重置了：说一声，记录清空：\(r.alerts) \(r.state)")
@@ -1233,6 +1814,87 @@ do {
     check(r.alerts.isEmpty && r.state.notified == [75], "提醒关着时跨过的阈值，打开后不补发：\(r.alerts)")
     r = UsageAlerts.evaluate(next(80), state: .init(last: 92, notified: [75, 90], cycleEnd: at(25, 15)), options: options, now: at(25, 19))
     check(r.alerts == [.threshold(75, runsOutAt: nil)], "App 没开着时进了新周期、已经用到 80%：新周期的 75% 照常提醒：\(r.alerts)")
+
+    // 第 11 条：改设置让估算从 80% 掉到 0%：只更新比较基准，不清这个周期的提醒记录；之后同一周期再看到 80% 不重发 75%
+    let at80 = UsageAlerts.State(last: 80, notified: [75], warned: false, cycleEnd: at(25, 15), cycle: 3)
+    r = UsageAlerts.evaluate(session(0, burn: nil), state: at80, options: options, now: at(25, 12), settingsChanged: true)
+    check(r.alerts.isEmpty && r.state.notified == [75] && r.state.last == 0 && r.state.cycle == 3 && r.state.cycleEnd == at(25, 15),
+          "改设置掉到 0%：没有「恢复」提醒、记录保留、基准更新：\(r.alerts) \(r.state)")
+    r = UsageAlerts.evaluate(session(80, burn: nil), state: r.state, options: options, now: at(25, 12, 1))
+    check(r.alerts.isEmpty && r.state.notified == [75], "同一周期里又收到 80% 的官方读数：不再发 75%：\(r.alerts)")
+    r = UsageAlerts.evaluate(session(91, burn: nil), state: r.state, options: options, now: at(25, 12, 2))
+    check(r.alerts == [.threshold(90, runsOutAt: nil)], "这个周期里新跨过的阈值照常提醒：\(r.alerts)")
+    // 同样掉到 0% 但不是改设置引起的：真的重置了，照旧说「恢复」、清记录
+    r = UsageAlerts.evaluate(session(0, burn: nil), state: at80, options: options, now: at(25, 15, 5))
+    check(r.alerts == [.reset] && r.state.notified.isEmpty && r.state.cycle == 4, "不是改设置：真的重置了：\(r.alerts) \(r.state)")
+    r = UsageAlerts.evaluate(session(30, burn: nil), state: at80, options: options, now: at(25, 12), settingsChanged: true)
+    check(r.alerts.isEmpty && r.state.notified == [75] && r.state.last == 30, "改设置掉到 30%：同样只更新基准")
+
+    // 第 13 条：并进阈值提醒的「快用完」预警和单独的预警共用开关、每周期一次的规则
+    r = UsageAlerts.evaluate(session(90, burn: 60), state: .init(last: 85, notified: [75]), options: off, now: at(25, 12, 30))
+    check(r.alerts == [.threshold(90, runsOutAt: nil)] && !r.state.warned, "预警关着、85% → 90%、15 分钟内用完：阈值照发，不夹带预警：\(r.alerts)")
+    r = UsageAlerts.evaluate(session(80, burn: 20), state: .init(last: 70), options: off, now: at(25, 12))
+    check(r.alerts == [.threshold(75, runsOutAt: nil)], "预警关着：不说几点用完（就算还没到半小时内）：\(r.alerts)")
+    r = UsageAlerts.evaluate(session(90, burn: 60), state: .init(last: 85, notified: [75], warned: true), options: options, now: at(25, 12, 30))
+    check(r.alerts == [.threshold(90, runsOutAt: nil)] && r.state.warned, "这个周期已经预警过：再跨阈值只发阈值，不再预警：\(r.alerts)")
+    r = UsageAlerts.evaluate(session(90, burn: 60), state: .init(last: 85, notified: [75]), options: options, now: at(25, 12, 30))
+    check(r.alerts == [.threshold(90, runsOutAt: at(25, 12, 40))] && r.state.warned, "开着、没预警过：并进阈值提醒，记成预警过：\(r.alerts)")
+    r = UsageAlerts.evaluate(session(91, burn: 60), state: r.state, options: options, now: at(25, 12, 35))
+    check(r.alerts.isEmpty, "并进去之后不再单独预警：\(r.alerts)")
+    check(UsageAlerts.evaluate(session(90, burn: 60), state: .init(last: 85, notified: [75]), options: silent, now: at(25, 12, 30)).alerts.isEmpty,
+          "用量提醒总开关关着：什么都不发")
+
+    // 第 12 条：按「窗口周期 + 提醒类型」重发。系统没收下 75% 的通知，回调回来时记录已经更新到 76% 了：
+    // 只把 75% 改回「还没发」，下一次刷新重发它，别的记录不动
+    let first = UsageAlerts.evaluate(session(75.5, burn: nil), state: .init(last: 70), options: options, now: at(25, 12))
+    check(first.alerts == [.threshold(75, runsOutAt: nil)] && first.state.notified == [75], "75% 的提醒发出（还没知道有没有送到）")
+    let moved = UsageAlerts.evaluate(session(76, burn: nil), state: first.state, options: options, now: at(25, 12, 1))
+    check(moved.alerts.isEmpty && moved.state.last == 76, "回调回来之前，下一张快照已经是 76%")
+    let failed = UsageAlerts.deliveryFailed(first.alerts[0], cycle: first.state.cycle, in: moved.state)
+    check(failed.notified.isEmpty && failed.retryThresholds == [75] && failed.last == 76 && failed.cycleEnd == moved.state.cycleEnd,
+          "只把 75% 改回没发，别的记录不动（旧做法整份比对对不上就永远漏发）：\(failed)")
+    let retried = UsageAlerts.evaluate(session(76.2, burn: nil), state: failed, options: options, now: at(25, 12, 2))
+    check(retried.alerts == [.threshold(75, runsOutAt: nil)] && retried.state.notified == [75] && retried.state.retryThresholds.isEmpty,
+          "下一次刷新只重发 75%：\(retried.alerts)")
+    check(UsageAlerts.evaluate(session(76.4, burn: nil), state: retried.state, options: options, now: at(25, 12, 3)).alerts.isEmpty, "送到了就不再发")
+    let failedAgain = UsageAlerts.deliveryFailed(retried.alerts[0], cycle: retried.state.cycle, in: retried.state)
+    check(UsageAlerts.evaluate(session(76.5, burn: nil), state: failedAgain, options: options, now: at(25, 12, 4)).alerts == [.threshold(75, runsOutAt: nil)],
+          "重发又失败：还会再重发")
+    // 失败的回调回来时已经进了新周期：旧周期的提醒不补
+    let newCycleState = UsageAlerts.evaluate(session(1, burn: nil), state: moved.state, options: options, now: at(25, 15, 5)).state
+    check(UsageAlerts.deliveryFailed(first.alerts[0], cycle: first.state.cycle, in: newCycleState) == newCycleState, "回调回来时已经是新周期：不补旧周期的")
+    // 重发时用量已经掉下去了（低于那个阈值）：不发过时的
+    let dropped = UsageAlerts.evaluate(session(60, burn: nil), state: failed, options: options, now: at(25, 12, 2))
+    check(dropped.alerts.isEmpty && dropped.state.retryThresholds.isEmpty, "用量已经低于这个阈值：不重发")
+    // 一次跨过两个阈值、更高的那个发失败：重发的只有它，更低的已经被它盖过
+    let jump = UsageAlerts.evaluate(session(92, burn: nil), state: .init(last: 70), options: options, now: at(25, 12))
+    check(jump.alerts == [.threshold(90, runsOutAt: nil)] && jump.state.notified == [75, 90], "一次跨过 75 和 90：只发 90")
+    let jumpFailed = UsageAlerts.deliveryFailed(jump.alerts[0], cycle: jump.state.cycle, in: jump.state)
+    check(jumpFailed.notified == [75] && jumpFailed.retryThresholds == [90]
+          && UsageAlerts.evaluate(session(92, burn: nil), state: jumpFailed, options: options, now: at(25, 12, 1)).alerts == [.threshold(90, runsOutAt: nil)],
+          "90 发失败：只重发 90")
+    // 「额度恢复」发失败：下一次刷新（用量还在 5% 以下）重发一次
+    let resetAlert = UsageAlerts.evaluate(session(0, burn: nil), state: at80, options: options, now: at(25, 15, 5))
+    let resetFailed = UsageAlerts.deliveryFailed(resetAlert.alerts[0], cycle: resetAlert.state.cycle, in: resetAlert.state)
+    let resetRetry = UsageAlerts.evaluate(session(0.5, burn: nil), state: resetFailed, options: options, now: at(25, 15, 6))
+    check(resetRetry.alerts == [.reset] && !resetRetry.state.retryReset, "「恢复」没送到：重发一次：\(resetRetry.alerts)")
+    check(UsageAlerts.evaluate(session(0.6, burn: nil), state: resetRetry.state, options: options, now: at(25, 15, 7)).alerts.isEmpty
+          && resetAlert.state.cycle == resetRetry.state.cycle, "只重发一次，周期号不会因为用量一直很低而一直涨")
+    // 「快用完」单独的预警发失败：warned 放回去，还快用完就再发；并进阈值提醒里的说了「几点用完」才算预警，没到半小时内的不算
+    let warnAlert = UsageAlerts.evaluate(session(85, burn: 60), state: .init(last: 80, notified: [75]), options: options, now: at(25, 12, 30))
+    check(warnAlert.alerts == [.runningOut(at(25, 12, 45))] && warnAlert.state.warned, "单独的预警")
+    let warnFailed = UsageAlerts.deliveryFailed(warnAlert.alerts[0], cycle: warnAlert.state.cycle, carriesWarning: true, in: warnAlert.state)
+    let rewarn = UsageAlerts.evaluate(session(86, burn: 60), state: warnFailed, options: options, now: at(25, 12, 31))
+    check(!warnFailed.warned && rewarn.alerts.count == 1 && { if case .runningOut = rewarn.alerts[0] { return true } else { return false } }(),
+          "预警没送到：下次还快用完就再发：\(rewarn.alerts)")
+    let mergedWindow = session(90, burn: 60)
+    let merged = UsageAlerts.evaluate(mergedWindow, state: .init(last: 85, notified: [75]), options: options, now: at(25, 12, 30))
+    check(UsageAlerts.carriesWarning(merged.alerts[0], window: mergedWindow, now: at(25, 12, 30)), "半小时内用完：这条阈值提醒同时是预警")
+    let mergedFailed = UsageAlerts.deliveryFailed(merged.alerts[0], cycle: merged.state.cycle, carriesWarning: true, in: merged.state)
+    check(!mergedFailed.warned && mergedFailed.retryThresholds == [90], "并进阈值提醒的预警没送到：warned 放回去，阈值也重发")
+    let calm = session(80, burn: 20)
+    let calmResult = UsageAlerts.evaluate(calm, state: .init(last: 70), options: options, now: at(25, 12))
+    check(!UsageAlerts.carriesWarning(calmResult.alerts[0], window: calm, now: at(25, 12)), "还要一个小时才用完：只是顺带说一句，不算预警")
 
     let w = session(85, burn: 60)
     check(UsageAlerts.title(.runningOut(at(25, 12, 45)), window: w, provider: .claude) == "Claude 5 小时会话快用完了", "预警标题")
@@ -1525,6 +2187,24 @@ check(Language.preferred(["en-AU", "zh-Hans-CN"]) == .en, "系统首选英文")
 check(Language.preferred(["ja-JP", "zh-Hans-CN"]) == .zhHans, "不支持的语言跳过，看下一个")
 check(Language.preferred(["zh-Hant-TW"]) == .en && Language.preferred(["fr-FR"]) == .en, "都不支持时用英文")
 
+do {  // 窗口名按 id 在当前语言下生成，快照里存着的是算快照那一刻的语言（可能已经过时）
+    func win(_ id: String, _ title: String) -> UsageWindow { UsageWindow(id: id, title: title, duration: 3600, percent: 50) }
+    let stale = [win("five_hour", "5 小时会话"), win("seven_day", "本周额度"), win("codex_1440m", "1 天额度"),
+                 win("codex_120m", "2 小时额度"), win("custom", "自定义")]
+    L10n.language = .en
+    defer { L10n.language = .zhHans }
+    check(stale.map(\.displayTitle) == ["5-hour session", "Weekly quota", "1-day quota", "2-hour quota", "自定义"],
+          "存着中文标题、界面是英文：按 id 重新生成，认不出的 id 用存着的：\(stale.map(\.displayTitle))")
+    L10n.language = .zhHans
+    let zh = [win("five_hour", "5-hour session"), win("seven_day", "Weekly quota"), win("codex_1440m", "1-day quota")]
+    check(zh.map(\.displayTitle) == ["5 小时会话", "本周额度", "1 天额度"], "反过来也一样：\(zh.map(\.displayTitle))")
+    check(win("codex_xm", "x").displayTitle == "x" && win("codex_0m", "y").displayTitle == "y", "id 格式不对：用存着的")
+    // 提醒的文字也跟着当前语言走，不用快照里存的旧标题
+    L10n.language = .en
+    let alert = UsageAlerts.title(.threshold(80, runsOutAt: nil), window: win("five_hour", "5 小时会话"), provider: .claude)
+    check(!alert.contains("会话") && alert.contains("5-hour session"), "提醒标题用当前语言的窗口名：\(alert)")
+}
+
 do {
     L10n.language = .en
     defer { L10n.language = .zhHans }
@@ -1573,10 +2253,11 @@ do {
     english += stale.notes + missing.notes
     english += demo.notes + codex.notes
     english += [CodexProvider.missingNote, CodexProvider.staleNote(readAt: Date(timeIntervalSinceNow: -5 * 3600), now: Date()), UsageWindow.title(minutes: 43200), UsageWindow.title(minutes: 120)]
-    english += [ClaudeCLIProbeStatus.idle, .querying, .ok(at: at(20, 12)), .failed(at: at(20, 12)), .notFound, .notLoggedIn, .wrongAccount]
+    english += [ClaudeCLIProbeStatus.idle, .querying, .ok(at: at(20, 12)), .failed(at: at(20, 12)), .notFound, .notLoggedIn, .wrongAccount,
+                .blocked(.cliTooOld), .blocked(.managedSettings), .blocked(.otherProvider)]
         .map { $0.text(now: at(20, 13)) }
-    english += [ClaudeCLI.loginScript(URL(fileURLWithPath: "/a/claude"), logoutFirst: true)]
-    english += [StalledOfficialHint.cliFillsIn, .cliRetrying, .cliNeedsLogin, .cliNotFound, .refreshDesktop, .openDesktop].map(\.text)
+    english += [ClaudeCLI.loginScript(URL(fileURLWithPath: "/a/claude"), logoutFirst: true, environment: ["HOME": "/h"])]
+    english += [StalledOfficialHint.cliFillsIn, .cliRetrying, .cliNeedsLogin, .cliNotFound, .cliBlocked, .refreshDesktop, .openDesktop].map(\.text)
     english += [ClaudeDesktopHistory.ParseError.unexpectedFormat.localizedDescription,
                 Fmt.clock(at(24, 9), now: at(25, 12)), Fmt.duration(30)]
     let alertWindow = UsageWindow(id: "five_hour", title: UsageWindow.sessionTitle, duration: fiveHours, percent: 85,

@@ -44,14 +44,15 @@ install: app
 # 发 GitHub Release 用：Apple 芯片 + Intel 通用版，压成 build/QuotaPet-<版本>.zip（版本号取 Info.plist）
 VERSION := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
 # 打包前：版本号要读得出来，QuotaPet/ 下不能有没提交的改动（发出去的包要和某次提交对得上）。
-# 打完包再查一遍：包里不能有本机绝对路径（仓库是公开的，Release 谁都能下载）
+# 打完包再查一遍最终的压缩包（解开来查文件名和内容，规则和提交钩子共用 ../.githooks/privacy-scan.sh）：
+# 不能有本机绝对路径、真实数据、截图、不在清单里的文件（仓库是公开的，Release 谁都能下载）
 release:
 	@if [ -z "$(VERSION)" ]; then echo "❌ 读不出 Resources/Info.plist 里的版本号"; exit 1; fi
 	@if [ -n "$$(git status --porcelain -- .)" ]; then git status --short -- .; echo "❌ 上面这些改动还没提交，先提交再打包"; exit 1; fi
 	UNIVERSAL=1 ./scripts/build-app.sh
-	@if grep -r -a -l "/Users/" $(APP); then echo "❌ 包里有本机绝对路径（上面列出的文件），不能发布"; exit 1; fi
 	rm -f build/QuotaPet-$(VERSION).zip
 	ditto -c -k --norsrc --noextattr --keepParent $(APP) build/QuotaPet-$(VERSION).zip
+	@./scripts/check-release-archive.sh build/QuotaPet-$(VERSION).zip
 	shasum -a 256 build/QuotaPet-$(VERSION).zip
 
 clean:

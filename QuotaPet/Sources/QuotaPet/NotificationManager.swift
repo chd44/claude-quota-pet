@@ -5,7 +5,8 @@ import QuotaPetCore
 
 /// 发系统通知：用量跨过阈值、照最近的速度快用完了、额度恢复了。
 /// 发什么、怎么说由 UsageAlerts 决定；每个窗口的提醒记录存在 UserDefaults 里，重启 App 也不会重复提醒。
-/// 发不出去的提醒（还没问过权限、系统没收下）不记成提醒过，之后还会再发
+/// 发不出去的提醒（还没问过权限、系统没收下）不记成提醒过，之后还会再发：按「窗口周期 + 提醒类型」逐条处理，
+/// 系统没收下哪一条，就只把那一条改回「还没发」（UsageAlerts.deliveryFailed），不依赖整份记录这期间有没有变过
 @MainActor
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     private let settings: AppSettings
@@ -76,7 +77,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         for window in new.windows {
             let key = "notify.\(new.provider.rawValue).\(window.id)"
             let old = loadState(key)
-            let (alerts, state) = UsageAlerts.evaluate(window, state: old, options: options, now: now)
+            let (alerts, state) = UsageAlerts.evaluate(window, state: old, options: options, now: now, settingsChanged: settingsChanged)
             if !muted, !alerts.isEmpty {
                 // 还没问过权限（第一次启动时弹窗还没点）、还没查到：发了系统也不显示，先不记，等能发了再发
                 guard let center, let authorization, authorization != .notDetermined else {
@@ -86,10 +87,16 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 if authorization != .denied {
                     let posts = alerts.map { (UsageAlerts.title($0, window: window, provider: new.provider),
                                               UsageAlerts.body($0, window: window, now: now)) }
-                    post(posts, center: center) { [weak self] delivered in
-                        // 系统没收下：退回原来的记录，下次刷新时再发（这期间记录又变了就算了，免得把新记录冲掉）
-                        guard let self, !delivered, self.loadState(key) == state else { return }
-                        self.saveState(key, old)
+                    let cycle = state.cycle
+                    post(posts, center: center) { [weak self] results in
+                        // 系统没收下的那几条：在回调回来时的最新记录上，只把它们改回「还没发」
+                        guard let self else { return }
+                        var current = self.loadState(key)
+                        for (alert, delivered) in zip(alerts, results) where !delivered {
+                            current = UsageAlerts.deliveryFailed(alert, cycle: cycle,
+                                                                carriesWarning: UsageAlerts.carriesWarning(alert, window: window, now: now), in: current)
+                        }
+                        if current != self.loadState(key) { self.saveState(key, current) }
                     }
                 }
             }
@@ -97,9 +104,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    /// 发几条通知；done(全都发出去了没有)，在主线程回调
+    /// 发几条通知；done(每一条有没有发出去，顺序和 posts 一样)，在主线程回调
     private func post(_ posts: [(title: String, body: String)], center: UNUserNotificationCenter,
-                      done: @escaping @MainActor (Bool) -> Void) {
+                      done: @escaping @MainActor ([Bool]) -> Void) {
         let requests = posts.map { post -> UNNotificationRequest in
             let content = UNMutableNotificationContent()
             content.title = post.title
@@ -108,11 +115,16 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             return UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         }
         Task { @MainActor in
-            var delivered = true
+            var results: [Bool] = []
             for request in requests {
-                do { try await center.add(request) } catch { delivered = false }
+                do {
+                    try await center.add(request)
+                    results.append(true)
+                } catch {
+                    results.append(false)
+                }
             }
-            done(delivered)
+            done(results)
         }
     }
 
@@ -122,7 +134,10 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         UsageAlerts.State(last: defaults.double(forKey: key + ".last"),
                           notified: Set((defaults.array(forKey: key + ".notified") as? [Int]) ?? []),
                           warned: defaults.bool(forKey: key + ".warned"),
-                          cycleEnd: defaults.object(forKey: key + ".cycle") as? Date)
+                          cycleEnd: defaults.object(forKey: key + ".cycle") as? Date,
+                          cycle: defaults.integer(forKey: key + ".cycleNumber"),
+                          retryThresholds: Set((defaults.array(forKey: key + ".retryThresholds") as? [Int]) ?? []),
+                          retryReset: defaults.bool(forKey: key + ".retryReset"))
     }
 
     private func saveState(_ key: String, _ state: UsageAlerts.State) {
@@ -130,5 +145,8 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         defaults.set(Array(state.notified).sorted(), forKey: key + ".notified")
         defaults.set(state.warned, forKey: key + ".warned")
         defaults.set(state.cycleEnd, forKey: key + ".cycle")
+        defaults.set(state.cycle, forKey: key + ".cycleNumber")
+        defaults.set(Array(state.retryThresholds).sorted(), forKey: key + ".retryThresholds")
+        defaults.set(state.retryReset, forKey: key + ".retryReset")
     }
 }

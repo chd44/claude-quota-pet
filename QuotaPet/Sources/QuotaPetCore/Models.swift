@@ -78,6 +78,20 @@ public struct UsageWindow: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// 显示用的窗口名：按窗口 id 在当前界面语言下生成。快照里存的 title 是后台算快照时那一刻的语言，
+    /// 切换语言后、下一次重算之前（或者提醒记录里留着的旧快照）可能还是旧语言，所以界面和通知都用这个
+    public var displayTitle: String {
+        switch id {
+        case "five_hour": return Self.sessionTitle
+        case "seven_day": return Self.weeklyTitle
+        default:
+            if id.hasPrefix("codex_"), id.hasSuffix("m"), let minutes = Int(id.dropFirst(6).dropLast()), minutes > 0 {
+                return Self.title(minutes: minutes)
+            }
+            return title
+        }
+    }
+
     /// 实时估算比官方读数多出来的部分（没有官方读数时，整个百分比都是估算）
     public var estimatedExtra: Double { official.map { max(0, percent - $0) } ?? percent }
 

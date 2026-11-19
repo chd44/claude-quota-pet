@@ -117,7 +117,11 @@ public enum WindowInference {
             while nextAnchor < anchors.count, (anchors[nextAnchor].exact ?? anchors[nextAnchor].by) <= t {
                 let anchor = anchors[nextAnchor]
                 nextAnchor += 1
-                guard let s = start, s <= (anchor.exact ?? anchor.after) else { continue }
+                guard let s = start, s <= (anchor.exact ?? anchor.after) else {
+                    // 没有在跑的窗口（重置之后还没有使用）：精确的重置照样生效，这之前的官方读数属于上一个窗口，不能再用
+                    if start == nil, let exact = anchor.exact, lastReset.map({ exact > $0 }) ?? true { lastReset = exact }
+                    continue
+                }
                 let natural = s.addingTimeInterval(duration)
                 let reset = anchor.exact ?? ((natural > anchor.after && natural <= anchor.by)
                     ? natural

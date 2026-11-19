@@ -141,8 +141,11 @@ public final class ClaudeTranscriptScanner {
         let tokens = TokenCounts(input: int(usage["input_tokens"]), cacheWrite5m: cw5, cacheWrite1h: cw1h,
                                  cacheRead: int(usage["cache_read_input_tokens"]), output: int(usage["output_tokens"]))
         let thinking = int((usage["output_tokens_details"] as? [String: Any])?["thinking_tokens"])
-        let key = (message["id"] as? String) ?? (obj["requestId"] as? String)
-            ?? "\(path)#\(obj["uuid"] as? String ?? UUID().uuidString)"
+        // 去重的键，和 usage_lab.py 的 load_requests 一样：message.id → requestId → （文件, uuid），都取非空的。
+        // 三个都没有的行归到同一个文件里的同一条（和 usage_lab 一样取各字段最大值）：键必须是确定的，
+        // 随机生成一个的话，每读一遍文件（换文件、重新扫描）都会重复算一遍
+        func nonEmpty(_ value: Any?) -> String? { (value as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        let key = nonEmpty(message["id"]) ?? nonEmpty(obj["requestId"]) ?? "\(path)#\(nonEmpty(obj["uuid"]) ?? "")"
 
         if var previous = records[key] {
             previous.tokens.formMax(tokens)

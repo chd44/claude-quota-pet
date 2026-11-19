@@ -11,7 +11,9 @@ enum DumpCommand {
         let org = (try? ClaudeDesktopHistory.parse(Data(contentsOf: ClaudeDesktopHistory.defaultURL)))?.last?.org
         let archive = CLIReadingArchive()
         let started = Date()
-        let status = CLIProbeRunner.run(archive: archive, expectedOrg: org)
+        let prober = ClaudeCLIProber(executor: ProcessCommandExecutor())
+        let status = prober.run(binary: ClaudeCLI.locate(), archive: archive, expectedOrg: org, cancellation: CLIProbeCancellation())
+            ?? .failed(at: Date())
         print("\(status.text(now: Date()))（用时 \(Int(Date().timeIntervalSince(started))) 秒）")
         if let last = archive.readings().last, case .ok = status {
             print("5 小时 \(last.session.map { Fmt.percent($0) } ?? "-")，\(last.sessionResetsAt.map { Fmt.clock($0, now: Date()) } ?? "-") 重置")

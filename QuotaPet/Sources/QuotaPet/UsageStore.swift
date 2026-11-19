@@ -30,13 +30,12 @@ final class UsageStore: ObservableObject {
     /// 正在监听的目录（启动时还不存在的目录，兜底刷新时会补上）
     private var watchedPaths: [String] = []
     private var pollTimer: Timer?
-    /// 文件变了、等着开始重算的几家（每家一个），见 scheduleRefresh
-    private var pendingEvents: [ProviderID: Task<Void, Never>] = [:]
-    /// 文件事件触发的重算的限频：同一家至少隔 5 秒（规则在 Core 里，能进自检）
-    private var throttle = RefreshThrottle()
-    /// 正在算的几家，和算的时候又有新变化、算完要再算一次的几家
+    /// 每家的刷新排期：文件事件的防抖和限频（从真正开始算起 5 秒）、算的时候又有新变化要不要再算（规则在 Core 里，能进自检）
+    private let gate = RefreshGate()
+    /// 单调时钟：改系统时间、休眠不影响限频
+    private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    /// 排着队或正在算的几家（和 gate 里的阶段一致，算完才去掉）
     private var running: Set<ProviderID> = []
-    private var again: Set<ProviderID> = []
     /// 改了设置、要按新设置重算的几家：下一次开始算的那次结果算「改设置引起的」。
     /// 改设置时正在算的那次可能已经读到了新设置（另记在 settingsChangedRunning），也一样算
     private var settingsChanged: Set<ProviderID> = []
@@ -123,64 +122,61 @@ final class UsageStore: ObservableObject {
         refresh()
     }
 
-    /// 要监听的目录可能是后来才有的（比如 App 开着的时候才第一次用 Codex）：目录有变化就重建监听
+    /// 要监听的目录可能是后来才有的（比如 App 开着的时候才第一次用 Codex）：目录有变化就重建监听。
+    /// 监听真的启动了才记下来；启动失败（FSEvents 没起来）就不记，下次兜底刷新再试，期间靠每分钟的兜底刷新撑着
     private func updateWatcher() {
         let existing = providers.flatMap(\.watchPaths).filter { FileManager.default.fileExists(atPath: $0) }
         guard existing != watchedPaths else { return }
-        watchedPaths = existing
-        watcher = FileWatcher(paths: existing) { [weak self] paths in
+        guard !existing.isEmpty else {
+            watcher = nil
+            watchedPaths = []
+            return
+        }
+        let new = FileWatcher(paths: existing) { [weak self] events in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let changed = self.providersAffected(by: paths)
+                let changed = WatchRouting.providersAffected(by: events, providers: self.providers)
                 if !changed.isEmpty { self.scheduleRefresh(changed) }
             }
         }
+        guard let new else { return }
+        watcher = new
+        watchedPaths = existing
     }
 
-    /// 哪几家的文件变了：路径在它监听的目录下、它也认这个文件。
-    /// 路径对不上任何一家的目录（比如软链接被展开了）时，交给所有认这个文件的
-    private func providersAffected(by paths: [String]) -> Set<ProviderID> {
-        var ids = Set<ProviderID>()
-        for path in paths {
-            let owners = providers.filter { $0.watchPaths.contains { path == $0 || path.hasPrefix($0 + "/") } }
-            for provider in owners.isEmpty ? providers : owners where provider.isRelevantChange(path: path) {
-                ids.insert(provider.id)
-            }
-        }
-        return ids
+    /// 文件事件会连着来一串，合并成一次刷新；同一家离上一次真正开始算不到 5 秒时等到点再算（RefreshGate）。
+    /// 已经排着队的那家不用再排：开始算时读的是那时候的文件，这期间的变化都算得到；开始算以后又变了的，算完会按限频再排一次
+    func scheduleRefresh(_ ids: Set<ProviderID>) {
+        for id in ids { arm(gate.fileChanged(id, now: uptime), for: id) }
     }
 
-    /// 文件事件会连着来一串，合并成一次刷新。同一家离上一次文件触发的重算不到 5 秒时等到点再算（RefreshThrottle）。
-    /// 已经在等的那家不用再排：开始算时读的是那时候的文件，这期间的变化都算得到；开始算以后又变了的，会按限频再排一次
-    func scheduleRefresh(_ ids: Set<ProviderID>, after delay: TimeInterval = 0.8) {
-        let now = Date()
-        for id in ids where pendingEvents[id] == nil {
-            let wait = throttle.delay(for: id, now: now, debounce: delay)
-            pendingEvents[id] = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                guard let self else { return }
-                pendingEvents[id] = nil
-                throttle.started(id, at: Date())
-                refresh([id])
-            }
+    private func arm(_ schedule: RefreshGate.Schedule, for id: ProviderID) {
+        guard case .after(let delay, let token) = schedule else { return }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, gate.timerFired(id, token: token) else { return }
+            launch(id)
         }
     }
 
-    /// 重算这几家（nil = 全部）。某一家正在算时，等它算完再算一次
+    /// 重算这几家（nil = 全部），不受限频管。某一家正在算时，等它算完再算一次
     func refresh(_ ids: Set<ProviderID>? = nil) {
         for provider in providers where ids?.contains(provider.id) ?? true {
-            let id = provider.id
-            if running.contains(id) {
-                again.insert(id)
-                continue
-            }
-            running.insert(id)
-            let afterSettings = settingsChanged.remove(id) != nil
-            queue.async { [weak self] in
-                let result = Result { try provider.snapshot(now: Date()) }
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.finish(id, result, afterSettings: afterSettings) }
-                }
+            if gate.request(provider.id) { launch(provider.id) }
+        }
+    }
+
+    /// 交给后台队列：轮到它、真正开始算的时候才记开始时间（限频从这里起算，排队的时间不算）
+    private func launch(_ id: ProviderID) {
+        guard let provider = providers.first(where: { $0.id == id }) else { return }
+        running.insert(id)
+        let afterSettings = settingsChanged.remove(id) != nil
+        let gate = gate
+        queue.async { [weak self] in
+            gate.began(id, now: ProcessInfo.processInfo.systemUptime)
+            let result = Result { try provider.snapshot(now: Date()) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.finish(id, result, afterSettings: afterSettings) }
             }
         }
     }
@@ -202,7 +198,11 @@ final class UsageStore: ObservableObject {
             if errors[id] != error.localizedDescription { errors[id] = error.localizedDescription }
             if settingsChange { settingsChanged.insert(id) }  // 这次没算出来，下一次成功的还算改设置引起的
         }
-        if again.remove(id) != nil { refresh([id]) }
+        switch gate.finished(id, now: uptime) {
+        case .none: break
+        case .runNow: launch(id)
+        case .after(let delay, let token): arm(.after(delay, token: token), for: id)
+        }
     }
 
     private func applyConfig(_ config: ClaudeProvider.Config) {

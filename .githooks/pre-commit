@@ -6,28 +6,16 @@
 fail=0
 say() { printf '%s\n' "$*" >&2; }
 
-# 1. 可能是真实数据或截图的文件（不分大小写：data.JSONL、intervals.jsonl.bak、CleanShot、screenshot 都算）
-bad=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR |
-  grep -iE '\.jsonl($|\.)|(^|/)popover-live[^/]*\.png$|(^|/)(snapshots|intervals|plan-usage-history)[^/]*$|screenshot|screen shot|cleanshot|截屏|屏幕快照')
-if [ -n "$bad" ]; then
-  say "✗ 这些文件可能是真实数据或截图，不能提交："
-  printf '%s\n' "$bad" | sed 's/^/    /' >&2
-  fail=1
-fi
+scan="$(dirname "$0")/privacy-scan.sh"
 
-# 2. 新增的内容里不能有本机绝对路径（比如贴进来的 --dump 输出），包括 JSON 里转义成 \/Users\/… 的。
+# 1. 可能是真实数据或截图的文件名（规则在 privacy-scan.sh，CI 和 make release 共用）
+git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | "$scan" names || fail=1
+
+# 2. 这次提交新增的内容：不能有本机绝对路径（比如贴进来的 --dump 输出，包括 JSON 里转义成 \/Users\/… 的），
+#    也不能有真实的对话日志（带会话字段的行，改个后缀也一样）。
 #    外部 diff 工具、textconv 会改掉 diff 的内容，二进制文件默认不显示内容，都关掉；grep 也要 -a，不然遇到二进制内容只说一句「匹配」
-user_dir="/Users/$(id -un)"
-added=$(git diff --cached -U0 --no-color --no-ext-diff --no-textconv --text |
-  grep -aE '^\+' | grep -avE '^\+\+\+ (b/|/dev/null)')
-hits=$(printf '%s\n' "$added" | grep -aF \
-  -e "$HOME" -e "$(printf '%s' "$HOME" | sed 's#/#\\/#g')" \
-  -e "$user_dir" -e "$(printf '%s' "$user_dir" | sed 's#/#\\/#g')")
-if [ -n "$hits" ]; then
-  say "✗ 新增内容里有本机路径 $HOME，换成 ~ 或删掉："
-  printf '%s\n' "$hits" | head -5 | cut -c1-160 | sed 's/^/    /' >&2
-  fail=1
-fi
+git diff --cached -U0 --no-color --no-ext-diff --no-textconv --text |
+  grep -aE '^\+' | grep -avE '^\+\+\+ (b/|/dev/null)' | "$scan" text || fail=1
 
 # 3. 作者和提交者的邮箱都要用 GitHub 的 noreply 地址，不暴露真实邮箱
 for who in AUTHOR COMMITTER; do
