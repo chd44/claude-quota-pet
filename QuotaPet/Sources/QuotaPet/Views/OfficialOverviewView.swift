@@ -452,6 +452,8 @@ struct OfficialTabs: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        // 液态玻璃接口只在 macOS 26 SDK（Swift 6.2 起）里有；更旧的工具链（比如 CI）只编毛玻璃版本
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             GlassEffectContainer(spacing: 4) {
                 segments { _ in
@@ -465,16 +467,24 @@ struct OfficialTabs: View {
                 .glassEffect(.regular, in: .capsule)
             }
         } else {
-            segments { _ in
-                Capsule()
-                    .fill(colorScheme == .dark ? Color.white.opacity(0.16) : Color.white)
-                    .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
-                    .matchedGeometryEffect(id: "selected", in: selection)
-            }
-            .padding(4)
-            .background(Capsule().fill(.ultraThinMaterial))
-            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+            materialBar
         }
+        #else
+        materialBar
+        #endif
+    }
+
+    /// macOS 26 以前：毛玻璃轨道 + 白色胶囊
+    private var materialBar: some View {
+        segments { _ in
+            Capsule()
+                .fill(colorScheme == .dark ? Color.white.opacity(0.16) : Color.white)
+                .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+                .matchedGeometryEffect(id: "selected", in: selection)
+        }
+        .padding(4)
+        .background(Capsule().fill(.ultraThinMaterial))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
     }
 
     private func segments<Pill: View>(@ViewBuilder pill: @escaping (OfficialQuotaEntry) -> Pill) -> some View {
