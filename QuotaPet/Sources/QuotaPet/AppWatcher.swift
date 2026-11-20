@@ -36,9 +36,9 @@ final class AppWatcher: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] in self?.codexRunning = $0 }
             .store(in: &cancellables)
-        // 装没装没有通知可听：桌面端开关时（刚装好第一次打开）和每分钟（删到废纸篓）各重新看一遍。
-        // 不跟着每个 App 的开关都查：runningApplications 连后台小进程的开关都算，在主线程上查得太勤
-        let recheck = Timer.publish(every: 60, on: .main, in: .common).autoconnect().map { _ in }
+        // Recheck installation on workspace events, with no recurring timer.
+        let recheck = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .map { _ in }
             .merge(with: $claudeRunning.map { _ in }, $codexRunning.map { _ in })
         recheck.map { Self.isInstalled(claudeBundleID) }
             .removeDuplicates()

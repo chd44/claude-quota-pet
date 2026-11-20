@@ -8,12 +8,6 @@ import QuotaPetCore
 /// 默认只在 Claude（在用 Codex 时还有 Codex）桌面端打开时出现，设置里可以改成一直显示。
 @MainActor
 final class StatusItemController: NSObject, NSPopoverDelegate {
-    private static let autosaveName = "QuotaPet"
-    /// 系统记录图标位置的 key（用户按住 ⌘ 拖动后系统会更新它）
-    private static let positionKey = "NSStatusItem Preferred Position \(autosaveName)"
-    /// 我们自己备份的位置
-    private static let savedPositionKey = "statusItemPosition"
-
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private let store: UsageStore
@@ -48,9 +42,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         self.keepVisible = keepVisible
         self.pinned = keepVisible
 
-        Self.restorePosition()
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.autosaveName = Self.autosaveName
+        statusItem = StatusItemPlacement.makeItem(length: NSStatusItem.variableLength)
         super.init()
         configureButton()
         configurePopover()
@@ -117,26 +109,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private func updateVisibility() {
         let show = visibility.shouldShow(appRunning: appRunning, canFollow: popoverState.canFollowApp, pinned: pinned || popover.isShown)
         if statusItem.isVisible != show {
-            if show { Self.restorePosition() } else { Self.rememberPosition() }
+            if show { StatusItemPlacement.restore() } else { StatusItemPlacement.remember() }
             statusItem.isVisible = show
         }
         animator.isVisible = show
-    }
-
-    // 新图标默认排在菜单栏最左边，菜单栏一挤（尤其是刘海屏）就会藏到刘海后面。
-    // 所以第一次把它放到最右边、紧挨着时钟（位置 0）。
-    // macOS 26 在隐藏图标时会删掉位置记录，再显示就跑回最左边，所以隐藏前备份一份，显示前写回去。
-    private static func restorePosition() {
-        let defaults = UserDefaults.standard
-        if defaults.object(forKey: positionKey) == nil {
-            defaults.set(defaults.object(forKey: savedPositionKey) ?? 0, forKey: positionKey)
-        }
-    }
-
-    private static func rememberPosition() {
-        if let position = UserDefaults.standard.object(forKey: positionKey) {
-            UserDefaults.standard.set(position, forKey: savedPositionKey)
-        }
     }
 
     /// 宠物藏起来的时候，再次打开 QuotaPet（Spotlight / 启动台）就把它叫出来，并打开面板。
@@ -238,7 +214,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private func configurePopover() {
         let root = PopoverRoot(store: store, settings: settings, state: popoverState, animator: animator,
-                               headerAnimator: headerAnimator, onQuit: { NSApp.terminate(nil) })
+                               headerAnimator: headerAnimator, onQuit: { [weak self] in self?.quit() })
         let host = NSHostingController(rootView: root)
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
@@ -292,5 +268,5 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     @objc private func refreshNow() { store.refreshNow() }
     @objc private func openSettings() { togglePopover(page: .settings) }
-    @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func quit() { settings.pauseDesktopAutoLaunch(); NSApp.terminate(nil) }
 }

@@ -1,198 +1,65 @@
-<div align="center">
+# QuotaPet
 
-<img src="docs/images/icon.png" width="112" alt="QuotaPet 图标">
+[English](README.en.md)
 
-# QuotaPet 额度宠物
+QuotaPet 启动后立即通过官方 CLI 的交互式 `/usage` 读取 agy 和 Claude 的真实额度，此后每 15 分钟刷新，三家都在后台保持读数，切换页签不清空、不重读；最近一次可用读数缓存在本机设置里，有效期内重启也先显示；只执行专用斜杠命令，不把 `/usage` 交给模型，不调用私有端点。Claude 和 Codex 也显示官方读数（2026-11-20/21 用户同意放开）：Claude 通过官方 Claude Code CLI 的交互式 `/usage` 读取（`--safe-mode --strict-mcp-config --tools ""`，专用空目录，只发这一条斜杠命令，读完删除这次产生的会话文件），之后每 15 分钟一次；`~/.claude/projects` 里有对话文件写入（只看文件事件，不读内容）时，活动停下 45 秒后自动再读，连续干活时最多每 3 分钟一次；手动刷新两次之间至少 30 秒；超过 15 分钟的读数即未知；Codex 只取 `~/.codex` 会话日志里服务器给的 `rate_limits`（百分比和重置时间），日志一写入就更新，超过 1 小时的读数即未知。QuotaPet 自己不联网、不读凭据和对话内容，不做本机估算。缺少读数、读取失败或读数过期时显示未知并使用中性形象；不通过手动选择额度或模拟数据驱动正常模式。
 
-**简体中文** · [English](README.en.md)
+左键点菜单栏宠物打开额度面板，右键打开操作菜单（官方入口、宠物形象、菜单栏百分比、启动方式、语言、退出）。面板顶部是宠物和当前状态，下面用 Claude / Codex / agy 切换条选择查看哪家，宠物和菜单栏也跟着这家。agy 页按官方 `/usage` 把每个模型组的五小时和每周窗口都画成进度条，数字是「已用 = 100 − 官方剩余」，并标出最紧张的窗口；菜单栏在宠物旁显示最紧张窗口的已用百分比（75% 起标橙、90% 起标红）。Claude 和 Codex 页沿用旧版卡片：官方百分比、读数时间、重置时间、平均节奏，以及按官方读数算的速度；没有可用读数时显示未知并给官方用量页按钮。面板右上的齿轮打开设置页（宠物形象、菜单栏、启动方式、语言）。Claude 和 Codex 各自记住选过的形象，切回 agy 也恢复上次选择的款式。可以在「宠物形象」里选择三款 agy 形象：默认的棱镜礼装（Prism Regalia）、反重力飞行员（Zero-G Pilot）、绣球花匠（Hydrangea Gardener）。0.4.2（build 15）包含三款共 30 张本地 PNG（6 张中性图与 24 张额度状态图）；参考了 ZipZipPipe 的「Gemini 娘」。[角色原设](https://www.bilibili.com/opus/1233069202138464289)
 
-[![CI](https://github.com/chd44/claude-quota-pet/actions/workflows/ci.yml/badge.svg)](https://github.com/chd44/claude-quota-pet/actions/workflows/ci.yml)
-
-**住在 macOS 菜单栏里的二次元小人，实时显示你的 Claude 订阅额度，也能一起看 Codex 的。**<br>
-额度越紧张她越累，用完了就睡着，还会告诉你多久后恢复。
-
-<img src="docs/images/menubar.png" width="484" alt="菜单栏效果：浅色和深色菜单栏，从 27% 一直到被限流后的恢复倒计时 1h23m">
-
-只读本机文件 · 不读登录凭据 · 只有一处会联网（命令行补查，可关）
-
-</div>
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-busy-dark.png">
-    <img src="docs/images/popover-busy.png" width="320" alt="面板：5 小时额度 86%，宠物有点累，提示照这个速度几点用完">
-  </picture>
-  &nbsp;
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-limited-dark.png">
-    <img src="docs/images/popover-limited.png" width="320" alt="面板：5 小时额度用完，宠物睡着了，显示多久后恢复">
-  </picture>
-</p>
-
-## 能做什么
-
-- **一眼看额度**：菜单栏上是宠物加 5 小时额度的百分比；75% 以上数字变橙，90% 以上变红，被限流时改成恢复倒计时，比如 `1h23m`
-- **点开看细节**：5 小时和本周额度、多久后重置、最近的消耗速度、「照这个速度几点用完」，以及本周额度比平均节奏多用还是少用了、之后每天还能用多少
-- **两次官方读数之间也是实时的**：官方读数 15 分钟才有一次，中间用 Claude Code 的本机日志估算，换算率从你自己的数据里自动学
-- **不用等到跨档位才有反应**：烧得快她会先慌起来，闲着会歇着，额度刚恢复会开心一阵；说的话也跟着实际情况走，点她一下还有回应（[详见下面](#宠物心情)）
-- **只在该提醒的时候提醒**：跨过 75% / 90% / 100% 各提醒一次；照最近的速度快用完时提前说一声（5 小时额度提前约半小时，每周额度提前约一天）；额度恢复时说一声
-- **也看 Codex**：本机用过 Codex 的话自动接进来，面板上切换着看，宠物跟着两家里更紧张的那个（[详见下面](#同时看-codex)）
-- **跟着 Claude 走**：打开 Claude 桌面端宠物就出现，关掉就藏起来（在用 Codex 时 Codex 桌面端也算；也可以设成一直显示。只用命令行、没装桌面端时自动一直显示）
-- **中英双语**：界面跟随系统语言，也可以在设置里切换（English UI available）
-
-## 宠物心情
-
-心情先看最紧张的那个额度窗口用了多少：
-
-| 使用率 | 状态 | 样子 |
-|---|---|---|
-| < 50% | 元气满满 | 星星眼，开心地笑 |
-| 50–75% | 状态不错 | 安静地看着你，隔一会儿眨眨眼 |
-| 75–90% | 有点累了 | 半睁眼，太阳穴冒汗 |
-| 90–100% | 快撑不住 | `>_<`，掉眼泪 |
-| ≥ 100% | 睡着了 | 闭上眼，睡得很香 |
-| 读不到数据 | 有点懵 | 挑着眉，一脸疑惑 |
-
-再看趋势，不用等到跨过档位她就有反应：
-
-| 情况 | 她的反应 |
+| 服务 | 官方查看入口 |
 |---|---|
-| 照最近的速度，半小时内就会用完（每周额度是一天内） | 提前哭，告诉你几点见底 |
-| 5 小时额度照这个速度撑不到重置 | 还没到 75% 就先慌起来：睁大眼、抿着嘴、冒汗 |
-| 额度刚恢复 | 开心一阵：「满血复活！」 |
-| 额度不紧张，又有半小时没用了 | 闭上眼歇着 |
+| Claude | [设置 → 用量](https://claude.ai/settings/usage) |
+| Codex | [设置 → 用量](https://chatgpt.com/codex/settings/usage) |
+| Antigravity（agy） | [官方 `/usage` 文档](https://antigravity.google/docs/cli/commands/usage)，在 agy CLI 中输入 `/usage` 查看当前账户 |
 
-只有额度真的用完了（官方读数到 100%，或者被限流），她才会睡着。
+网页由默认浏览器打开，登录和实际读数由官方页面负责。安装了 Antigravity 时可直接打开官方 App，在设置里查看用量。终端用户可打开 `/usage` 的官方说明。
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-rush-dark.png">
-    <img src="docs/images/popover-rush.png" width="320" alt="面板：5 小时额度才 58%，但照这个速度一小时要烧 45%，她已经有点慌了">
-  </picture>
-  &nbsp;
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-idle-dark.png">
-    <img src="docs/images/popover-idle.png" width="320" alt="面板：50 分钟没用了，她闭着眼歇着">
-  </picture>
-</p>
+## 为什么不固定显示「5 小时」
 
-她在面板上说的话也跟着实际情况走：几点见底、多久后恢复、这周比平均节奏多用还是少用、别处是不是也在用；同一种情况有几句，每次点开换一句。点她一下，她会做个表情、回你一句；连着戳个不停，她会闹别扭。
+套餐和账户规则会变，五小时窗口并不适用于所有人。按 2026-11-20 核验的[OpenAI 定价说明](https://learn.chatgpt.com/docs/pricing)，Codex Pro 当前没有五小时限制；[Claude Help](https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work) 也说明已验证的 Ultra 账户没有五小时限制。具体限制以当前账户的官方用量页为准。
 
-<img src="docs/images/pet-sheet.png" width="392" alt="宠物（经典款）的全部动画帧，每行一种心情">
+QuotaPet 不猜测套餐、额度窗口和百分比，不把过期读数当作当前额度。切换账号后只看新账号的读数；升级或降级以官方页面为准。agy 仅使用上述官方 CLI 交互式命令；不使用中间服务、内部接口或本机日志替代。
 
-一共八款形象。Claude 有五款，在「设置 → Claude」里选；Codex 有自己的三款：
+## 使用与启动
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/styles-dark.png">
-    <img src="docs/images/styles.png" width="604" alt="八款形象：Claude 的经典、猫耳、青春、魔女、墨镜，Codex 的龙娘、汉服、极客">
-  </picture>
-</p>
+需要 macOS 14 或以上。下载后将 App 放入 `/Applications` 或 `~/Applications`，手动打开即可使用。不会自动替新用户打开登录项。
 
-每款都有十四个表情。汗珠、眼泪直接画在表情里，睡着、有点懵、刚被叫醒都是单独的表情。
+菜单栏里找不到正在运行的宠物时，在 Finder 里再次打开 QuotaPet：图标可见时在它下面弹出额度面板；被刘海或其他图标挤掉时，同一个面板会浮现在当前屏幕右上角。
 
-## 同时看 Codex
+- 桌面联动需要主动在「宠物菜单 → 启动方式」开启；系统要求时，在登录项设置中批准后台助手。
+- 助手通过 `NSWorkspace` 事件等待 Claude/Codex 桌面端启动，不循环扫描进程，也不查询额度。桌面自动带起的主程序在最后一个相关桌面端退出后关闭；手动或 CLI 唤起的程序保留运行。
+- 额度面板可随时手动打开。开启桌面联动成功后，会关闭旧版主程序的登录自启；若 macOS 要求批准，旧设置先保留，可从菜单单独关闭。
+- 点「退出」会暂停桌面自动带起；再次手动或 CLI 唤起后恢复。是否启用后台助手仍由启动方式开关决定。
 
-在这台 Mac 上用过 Codex（命令行或桌面端）的话，QuotaPet 会自动把它的额度也接进来，不用设置：
-
-- 面板顶部多一个 Claude / Codex 切换条，上面带着两家的百分比；每次点开先看更紧张的那家
-- 宠物和菜单栏上的数字跟着两家里更紧张的那个，数字前面的小图标告诉你是哪家：星号是 Claude，终端是 Codex
-- Codex 有自己的一组宠物：龙娘、汉服、极客，在「设置 → Codex」里选；和 Claude 的五款互不重叠，一眼就能分开
-- 不想看 Codex 的话，在「设置 → Codex」里关掉，面板、菜单栏和提醒就只管 Claude
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-codex-tab-dark.png">
-    <img src="docs/images/popover-codex-tab.png" width="320" alt="面板：切到 Codex，本周额度 93%，Codex 的宠物（龙娘）快撑不住了">
-  </picture>
-  <br>
-  <img src="docs/images/menubar-codex.png" width="384" alt="菜单栏：数字前面的小图标，星号是 Claude，终端是 Codex；Codex 的宠物是龙娘">
-</p>
-
-## 安装
-
-需要 macOS 14 以上，Apple 芯片和 Intel 都能用。
-
-### 直接下载
-
-1. 在 [Releases](https://github.com/chd44/claude-quota-pet/releases/latest) 下载 `QuotaPet-版本号.zip`，解压后把「额度宠物」拖进「应用程序」文件夹。
-2. 双击打开。QuotaPet 没有花钱买苹果的开发者签名，第一次打开 macOS 会拦下来，说无法验证开发者：点「完成」，到「系统设置 → 隐私与安全性」拉到最下面，点「仍要打开」。只需要这一次。
-   也可以在终端里执行 `xattr -dr com.apple.quarantine /Applications/QuotaPet.app` 解除拦截。
-3. 第一次打开时宠物会出现在菜单栏，并弹出面板说明读到了哪些数据；放在「应用程序」文件夹里的话，会顺便打开开机自启。
-
-### 从源码编译
-
-装命令行工具（`xcode-select --install`）就够，不需要 Xcode。
+终端用户可在当前交互式 bash/zsh 会话中，主动加载**实际安装的 bundle** 内脚本，例如：
 
 ```bash
-git clone https://github.com/chd44/claude-quota-pet.git
-cd claude-quota-pet/QuotaPet
-make install    # 编译，装到 ~/Applications，并打开开机自启
+source "/Applications/QuotaPet.app/Contents/Resources/quotapet-shell.sh"
+# 如果装在用户 Applications，改用这一条：
+source "$HOME/Applications/QuotaPet.app/Contents/Resources/quotapet-shell.sh"
 ```
 
-### 装好以后
+脚本只在运行 `claude` / `codex` 时请求唤起 QuotaPet，保留参数、标准输入输出和返回码；已有同名 alias/function 时会跳过并提示。不会修改 `.zshrc`、`.bashrc` 等启动文件，也不会调用官方 CLI 查询额度。
 
-官方额度读数是 [Claude 桌面端](https://claude.ai/download)记录的，所以要装好并登录它。之后一打开 Claude，宠物就会出现在菜单栏右边。第一次启动时 macOS 会问要不要允许通知，选允许才能收到用量提醒；选了不允许的话，设置页会提示并带你去系统设置里打开。
+## 构建与验证
 
-只想先看看效果的话，`make demo` 会用假数据跑一轮，75 秒看完宠物的所有状态。
-
-**用在别的电脑上**：每台 Mac 各装一份，按上面的步骤来。QuotaPet 只读这台 Mac 上的文件，唯一会联网的是可以关掉的命令行补查，设备之间不同步，所以每台显示的是它自己看到的用量：
-
-- Claude：这台 Mac 上要装好并登录 Claude 桌面端，否则只有 Claude Code 日志估算出来的数。新版桌面端有时会停掉后台刷新（Anthropic 的服务端开关控制），它只在你最近右键点过菜单栏里的 Claude 图标之后才后台刷新（约 24 小时），读数停了的话，右键点一下那个图标，或者重启一下 Claude 桌面端，会记一次新读数；想一劳永逸，用命令行登录一次，设置里的「用 Claude 命令行补官方读数」默认开着（会联网，见下面「数据从哪来」）。设置 → Claude → 官方读数里也有这些说明。
-- Codex：这台 Mac 上用过 Codex，面板里才会出现 Codex 页签。
-- 在手机、网页、别的电脑，或者 Dot 这样的云端任务里用掉的额度，要等这台 Mac 的下一次官方读数（Claude 每 15 分钟一次）或下一次在本机用 Codex 才看得到。Codex 的读数超过 1 小时没更新时，面板会提示。
-
-用法、设置项和代码结构见 [QuotaPet/README.md](QuotaPet/README.md)。
-
-## 数据从哪来
-
-| 数据 | 来源 |
-|---|---|
-| 官方 5 小时 / 每周 % | Claude 桌面端每 15 分钟写一次的 `~/Library/Application Support/Claude/plan-usage-history.json` |
-| 两次读数之间的变化 | Claude Code 的本机日志 `~/.claude/projects/**/*.jsonl`：按 API 价格折成美元，再用自动学到的换算率换成百分比 |
-| 重置时间 | 推算：窗口从上一个窗口结束后的第一次使用开始计时；Claude Code 被限流时，用日志里服务器给的精确恢复时间 |
-| Codex 的 % 和重置时间 | Codex 每轮对话结束时写进 `~/.codex/sessions/**/*.jsonl` 的额度字段（`rate_limits`），是服务器给的官方数字，不用估算 |
-| 官方读数的备用来源（默认开启，可关） | 设置里的「用 Claude 命令行补官方读数」开着时，QuotaPet 在你正在用 Claude Code、官方读数又旧了的时候，让 Claude 命令行发一个最小请求（haiku、一个字），从回复里读出 5 小时和每周额度的百分比和重置时间，存在 `~/Library/Application Support/QuotaPet/cli-readings.jsonl` |
-
-- 聊天（含桌面端）、网页端和手机端的用量不在本机日志里，要等下一次官方读数（最多 15 分钟）才会体现。读数到了以后，官方增量里本机日志解释不了的部分算作「其他端」用量：面板会标出每个窗口里其他端用了多少，消耗速度和「几点用完」也会算上它。
-- 估算值最多显示到 99%，只有官方读数或 Claude Code 的限流消息能宣布「用完了」，免得宠物误睡、误发提醒。
-- **只有一处会联网**。「用 Claude 命令行补官方读数」是唯一会联网的功能，默认开启、可以在设置里关掉：联网的是 Claude 命令行本身，用它自己的登录，QuotaPet 不读登录凭据（只看 `claude auth status` 里是否登录、哪个组织，用来确认和桌面端是同一个账号）。每次查询占一点额度；只在你正在用 Claude Code、官方读数又旧了的时候查，因为 5 小时窗口从第一次请求才开始计时，不在用时去查会让窗口提前开始。命令行要先在终端里 `claude auth login` 登录一次，设置页会给出命令。
-- Codex 的读数只在本机用 Codex 时更新，网页或云端任务（比如 Dot）的用量要等下次在本机用时才看得到，超过 1 小时没更新时面板会提示。QuotaPet 只读对话日志里的额度字段，不读 `~/.codex/auth.json` 等登录凭据。
-
-## 额度实验室
-
-[`usage_lab.py`](usage_lab.py) 是做这个 App 之前的实验工具：把 Claude Code 的逐请求 token 记录和官方额度读数按时间对齐，用回归估算「1% 额度 ≈ 多少美元的 API 用量」。只用 Python 标准库。
+SwiftPM + Command Line Tools 即可，不需要完整 Xcode。在仓库的 `QuotaPet/` 目录执行：
 
 ```bash
-python3 usage_lab.py summary --hours 24             # 最近 24 小时各模型的 token 用量
-python3 usage_lab.py snap 40 12 --note 实验开始      # 手动记一个额度快照（5 小时 %、每周 %）
-python3 usage_lab.py ratio                          # 每周 % 和 5 小时 % 的换算比
-python3 usage_lab.py calibrate --since 2026-09-25T10:00   # 回归
-python3 usage_lab.py backtest                       # 按 App 的学习方式逐区间回测实时估算
+swift build
+make check
+make app       # 生成 build/QuotaPet.app
+make dump      # 只列官方入口，不读取真实额度
+make demo      # 合成数据演示，不代表当前账户
+make relay-previews  # 合成数据接力预览
 ```
 
-目前的结论：所有模型用同一个系数最准，思考程度（effort）不用单独算，但缓存读在额度里只算一半左右（按这个口径，约 $0.27 ≈ 1% 的 5 小时额度）。实验过程见[产品规划](docs/PRODUCT_PLAN.md)第 7 节。
+`--probe-cli` 已禁用并拒绝执行，不会发出探测请求。`--demo` 和 relay previews 保留旧额度界面的假数据演示；旧截图不能视为正常模式或真实读数。详见[开发说明](QuotaPet/README.md)。
 
-## 目录
+## 历史、贡献与许可证
 
-```
-QuotaPet/             菜单栏 App（Swift + SwiftUI，SwiftPM 构建）
-  Sources/            QuotaPetCore 纯逻辑 / QuotaPet App 本体 / QuotaPetChecks 自检
-  design/painted/     宠物形象的脚本：出提示词，把 GPT 出的图切成 App 用的图
-usage_lab.py          额度实验室
-docs/PRODUCT_PLAN.md  产品规划和实测记录
-```
+原日志估算、额度提醒、动态宠物等设计保留在[历史 README](https://github.com/chd44/claude-quota-pet/blob/8d155d6/README.md)，不代表当前正常模式；[产品规划](docs/PRODUCT_PLAN.md) 已注明新边界。旧实验脚本与核心逻辑供历史研究、自检和合成演示，不接入正常模式。
 
-## 说明
+欢迎[反馈问题](https://github.com/chd44/claude-quota-pet/issues/new?template=feedback.yml)或提交 PR。请说明触发条件，使用合成测试数据，不提交真实日志、凭据或账户截图；修改后运行相关自检。项目与 Anthropic、OpenAI、Google 均无隶属关系。
 
-- 这是个人项目，不是 Anthropic 或 OpenAI 的官方工具，和它们也没有关系。
-- 官方读数来自 Claude 桌面端的内部文件和 Codex 的对话日志，格式随时可能变。读不了的时候宠物会显示「有点懵」，面板里会说明原因。
-- 除了官方读数，其他数字都是估算，可能差几个百分点。
-
-## 反馈
-
-用完感觉怎么样、有没有遇到问题，欢迎[提个 issue](https://github.com/chd44/claude-quota-pet/issues/new?template=feedback.yml)。
-
-## 许可证
-
-[MIT](LICENSE)
+[MIT License](LICENSE)

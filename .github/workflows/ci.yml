@@ -64,20 +64,22 @@ jobs:
       - name: usage_lab.py 去重规则一致
         run: python3 scripts/check-transcript-parity.py
 
-      # 预览图都是假数据，只有 popover-live* 读本机真实额度；runner 上没有真实数据，但还是删掉，免得以后误传
+      # 所有入口只渲染合成数据；清掉旧版本可能残留的 live 图，避免复用构建目录时上传。
       - name: 渲染预览图
         id: previews
         continue-on-error: true
         run: |
-          swift run -c release QuotaPet --render-previews build/previews
           rm -f build/previews/popover-live*
+          swift run -c release QuotaPet --render-previews build/previews
 
       - name: 上传预览图
         if: steps.previews.outcome == 'success'
         uses: actions/upload-artifact@v5
         with:
           name: previews
-          path: QuotaPet/build/previews
+          path: |
+            QuotaPet/build/previews
+            !QuotaPet/build/previews/popover-live*
           retention-days: 14
 
   privacy:

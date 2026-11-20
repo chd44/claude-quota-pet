@@ -3,6 +3,7 @@ import SwiftUI
 import QuotaPetCore
 
 /// QuotaPet --render-previews <dir>：把宠物动画、菜单栏效果和面板渲染成 PNG，
+/// 仅用合成数据和内存设置，不读本机账号、额度或设置，不触发系统注册。
 /// 不用真的启动 App 就能检查设计。面板和设置页中英各一套，英文的文件名带 -en。
 /// 同时有 Claude 和 Codex 时的样子在 popover-codex*、menubar-codex、settings-codex*。
 @MainActor
@@ -10,15 +11,12 @@ enum PreviewRenderer {
     static func renderAll(to dir: URL) {
         _ = NSApplication.shared
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let settings = AppSettings()  // 它会按设置切换界面语言，所以要在下面固定语言之前建
-        // 「官方读数」那一组打开时的样子：用一份临时的设置，不动本机真实的设置（它建出来时也会切换界面语言，所以在下面固定语言之前）
-        let probeSuite = "dev.quotapet.previews"
-        UserDefaults.standard.removePersistentDomain(forName: probeSuite)
-        let probeDefaults = UserDefaults(suiteName: probeSuite)!
+        // 预览只用内存设置和合成额度；不读写真实设置，不注册登录项或后台助手。
+        let settings = AppSettings(defaults: TransientDefaults(), allowsSystemActions: false)
+        let probeDefaults = TransientDefaults()
         probeDefaults.set(true, forKey: "claudeCLIProbe")
-        let probeSettings = AppSettings(defaults: probeDefaults)
-        defer { UserDefaults.standard.removePersistentDomain(forName: probeSuite) }
-        L10n.language = .zhHans  // 动画表上的心情名、真实数据那两张用中文
+        let probeSettings = AppSettings(defaults: probeDefaults, allowsSystemActions: false)
+        L10n.language = .zhHans  // 动画表上的心情名用中文
         for style in PetStyle.allCases {
             let suffix = style == .classic ? "" : "-\(style.rawValue)"
             write(spriteSheet(style: style), to: dir.appendingPathComponent("pet-sheet\(suffix).png"))
@@ -28,20 +26,6 @@ enum PreviewRenderer {
         write(menuBarGlyphStrip(), to: dir.appendingPathComponent("menubar-codex.png"))
 
         let now = Date()
-        // 用本机真实数据渲染一张，和点开菜单栏看到的一样：先看宠物跟着的那家（宠物停在第一帧）
-        let live = UsageSnapshot.visible([try? ClaudeProvider().snapshot(now: now), try? CodexProvider().snapshot(now: now)].compactMap { $0 },
-                                         hidden: settings.hiddenProviders)
-        if let focus = UsageSnapshot.focus(of: live) {
-            let status = PetStatus.of(focus, now: now), mood = status.mood
-            let style = PetStyle.of(focus.provider, claudeStyle: settings.petStyle, codexStyle: settings.codexPetStyle)
-            for dark in [false, true] {
-                let view = OverviewView(snapshot: focus, errorMessage: nil, mood: mood, line: status.line(0),
-                                        pet: PetImage(picture: PetSprites.frames(for: mood, style: style)[0].portrait),
-                                        tabs: live.count > 1 ? live : [], focus: focus.provider, fixedNow: now)
-                write(render(view, dark: dark), to: dir.appendingPathComponent("popover-live\(dark ? "-dark" : "").png"))
-            }
-        }
-
         for language in Language.allCases {
             L10n.language = language
             let lang = language == .zhHans ? "" : "-\(language.rawValue)"

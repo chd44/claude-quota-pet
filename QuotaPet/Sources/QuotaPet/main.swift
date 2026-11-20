@@ -3,12 +3,13 @@ import QuotaPetCore
 
 // 命令行参数：
 //   --demo                   演示模式（假数据，75 秒看完宠物的所有状态）
-//   --enable-login-item      打开「开机自动启动」（make install 用）
+//   --enable-login-item      打开「开机自动启动」（需显式指定）
 //   --watch-bundle-id <id>   调试用：把「Claude 打开时显示」盯的 Claude 桌面端换成别的 App
-//   --dump                   在终端打印当前额度（只读本机文件），和 usage_lab.py 对账用
-//   --probe-cli              用 Claude 命令行查一次官方读数（会联网、占一个最小请求），调试用
+//   --dump                   在终端列出官方查看入口
+//   --probe-cli              旧参数；提示改用官方入口
 //   --render-previews <dir>  把宠物和面板渲染成 PNG
 //   --render-relay-previews <dir>  双宠接力和面板顶部信息的三张预览图（只用合成数据，不读本机数据和设置）
+//   --render-official-previews <dir>  正常模式额度面板的预览图（只用合成读数）
 //   --render-icon <dir>      生成 App 图标的 .iconset
 let arguments = CommandLine.arguments
 
@@ -18,18 +19,23 @@ func value(after flag: String) -> String? {
 }
 
 if arguments.contains("--probe-cli") {
-    MainActor.assumeIsolated { DumpCommand.probe() }
-    exit(0)
+    FileHandle.standardError.write(Data((tr("命令行补查已停用。请用 --dump 查看官方入口。",
+                                            "CLI probing is disabled. Use --dump for official destinations.") + "\n").utf8))
+    exit(2)
 }
 
 if arguments.contains("--dump") {
-    DumpCommand.run()
+    for entry in OfficialQuotaEntry.allCases { print(entry.title, entry.url.absoluteString, separator: "\t") }
     exit(0)
 }
 
 MainActor.assumeIsolated {
     if let dir = value(after: "--render-previews") {
         PreviewRenderer.renderAll(to: URL(fileURLWithPath: dir))
+        exit(0)
+    }
+    if let dir = value(after: "--render-official-previews") {
+        OfficialPreviews.renderAll(to: URL(fileURLWithPath: dir))
         exit(0)
     }
     if let dir = value(after: "--render-relay-previews") {
