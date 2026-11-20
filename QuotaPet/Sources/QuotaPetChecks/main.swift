@@ -34,6 +34,76 @@ typealias S = UsageSample
 // 下面按中文文案比对，不受这台机器系统语言的影响；英文在「多语言」一节单独查
 L10n.language = .zhHans
 
+lifecycleChecks()
+agyRefreshChecks()
+agyPresentationChecks()
+agyResetChecks()
+checkAgyQuotaParser()
+checkAgyPanelWindows()
+checkAgyPrimaryAndStates()
+checkClaudeCLIUsage()
+checkRefreshAndExpiry()
+
+// Normal-mode appearance restores its saved choice without changing demo pet families.
+do {
+    for style in PetStyle.allCases {
+        let choice = OfficialPetChoice(rawValue: style.rawValue)!
+        check(choice.style == style && !choice.isAntigravity, "旧宠物选择保留原款式")
+        check(OfficialPetChoice(rawValue: choice.rawValue) == choice, "旧宠物选择可持久化还原")
+    }
+    let agyRawValues = ["agy", "agy-aurora", "agy-stargazer"]
+    check(OfficialPetChoice.antigravityChoices.map(\.rawValue) == agyRawValues, "agy 有三款有序选择")
+    for (index, raw) in agyRawValues.enumerated() {
+        let choice = OfficialPetChoice(rawValue: raw)!
+        check(choice.isAntigravity && choice.style == nil, "agy 每款都属于专属家族")
+        // 0.4.1 stores the visible choice and the remembered agy choice separately.
+        var restored = OfficialPetSelection(choice: OfficialPetChoice(rawValue: "witch")!,
+                                            claudeStyle: .witch, codexStyle: .hanfu,
+                                            antigravityChoice: OfficialPetChoice(rawValue: raw)!)
+        restored.select(entry: .antigravity)
+        check(restored.choice.rawValue == raw && restored.choice == choice,
+              "0.4.1 独立记住的 agy 槽位升级后保持相同选择")
+        let prefix = ["", "pilot-", "gardener-"][index]
+        check(choice.menuFile == "agy/\(prefix)menu.png" && choice.panelFile == "agy/\(prefix)panel.png", "agy 每款使用自己的双图")
+        var saved = OfficialPetSelection(choice: choice, claudeStyle: .witch, codexStyle: .hanfu)
+        saved.select(entry: .claude)
+        saved = OfficialPetSelection(choice: saved.choice, claudeStyle: saved.claudeStyle,
+                                     codexStyle: saved.codexStyle, antigravityChoice: saved.antigravityChoice)
+        saved.select(entry: .antigravity)
+        check(saved.choice == choice, "agy 离开并重启后恢复自己的上次款式")
+        saved.select(entry: .codex)
+        check(saved.choice.style == .hanfu && saved.claudeStyle == .witch, "三款 agy 不覆盖另外两家款式")
+    }
+    let agy = OfficialPetChoice(rawValue: "agy")!
+    check(agy.isAntigravity && agy.style == nil, "agy 不借用 Claude 或 Codex 的款式")
+    check(agy.menuFile == "agy/menu.png" && agy.panelFile == "agy/panel.png", "agy 菜单栏与面板各用专属资源")
+    check(OfficialPetChoice(rawValue: "invalid") == nil, "损坏的选择交给设置默认值处理")
+    var selection = OfficialPetSelection(choice: OfficialPetChoice(rawValue: "witch")!, claudeStyle: .classic, codexStyle: .hanfu)
+    selection.select(entry: .antigravity)
+    check(selection.choice.isAntigravity && selection.claudeStyle == .witch, "点 agy 保留上回 Claude 款式")
+    selection = OfficialPetSelection(choice: OfficialPetChoice(rawValue: selection.choice.rawValue)!,
+                                     claudeStyle: selection.claudeStyle, codexStyle: selection.codexStyle)
+    selection.select(entry: .codex)
+    check(selection.choice.style == .hanfu, "重启后点 Codex 恢复它上回汉服款式")
+    selection.select(entry: .antigravity)
+    selection.select(entry: .claude)
+    check(selection.choice.style == .witch, "从 agy 点 Claude 恢复魔女款式")
+    selection.select(OfficialPetChoice(rawValue: "geek")!)
+    selection.select(entry: .antigravity)
+    selection.select(entry: .codex)
+    check(selection.choice.style == .geek && selection.claudeStyle == .witch, "手选普通款只更新它所属家的选择")
+
+}
+
+
+// Official entries never substitute a local percentage for an account dashboard.
+do {
+    let destinations = OfficialQuotaEntry.allCases.map { $0.url.absoluteString }
+    check(destinations == ["https://claude.ai/settings/usage", "https://chatgpt.com/codex/settings/usage",
+                           "https://antigravity.google/docs/cli/commands/usage"], "三家入口指向官方页面")
+    check(OfficialQuotaEntry.allCases.last?.title.contains("/usage") == true, "agy 文档入口说明怎样打开真实账户额度")
+}
+
 // MARK: - 格式化
 
 check(Fmt.duration(2 * hour + 14 * 60) == "2 小时 14 分", "duration")

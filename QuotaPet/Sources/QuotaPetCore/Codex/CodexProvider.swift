@@ -11,7 +11,18 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
 
     /// 最近的读数比这更旧时提醒一句：网页、Dot 之类云端任务的用量要等下次在本机用 Codex 才会记下来。
     /// 云端任务可以在你不动的时候一直跑，所以不能等太久
-    static let staleAfter: TimeInterval = 3600
+    public static let staleAfter: TimeInterval = 3600
+
+    /// 正常模式的过期规则：最近一次官方读数超过 staleAfter 就是未知，不拿旧读数当现在的额度（演示模式不用）
+    public static func expiringStale(_ snapshot: UsageSnapshot, now: Date) -> UsageSnapshot {
+        guard snapshot.provider == .codex, snapshot.hasData, let readAt = snapshot.officialAt,
+              now.timeIntervalSince(readAt) >= staleAfter else { return snapshot }
+        let ago = Fmt.ago(readAt, now: now)
+        return UsageSnapshot(provider: .codex, windows: [], generatedAt: now, officialAt: readAt,
+                             notes: [tr("Codex 最近一次记下官方读数是\(ago)（最后一次在这台 Mac 上用 Codex 时）。超过 1 小时的读数不当作现在的额度；在本机用一次 Codex 就会更新，或在官方页面查看。",
+                                        "Codex last recorded an official reading \(ago), the last time you used it on this Mac. Readings older than an hour aren’t treated as current usage; use Codex here once to update it, or check the official page.")],
+                             hasData: false)
+    }
 
     public static var missingNote: String {
         tr("没找到 Codex 的额度记录。在这台 Mac 上用 Codex（命令行或桌面端）聊过之后就会显示。",

@@ -1,0 +1,91 @@
+import Foundation
+
+public struct AgyQuotaReading: Codable, Sendable {
+    public enum Status: String, Codable, Sendable { case available, unknown, signInRequired, confirmationRequired, unavailable }
+    /// One explicitly labelled remaining-percentage row of the official panel, in panel order.
+    public struct Window: Equatable, Codable, Sendable {
+        public let group: String
+        /// "每周" or "五小时", as labelled by the official panel.
+        public let window: String
+        public let remainingPercent: Double
+        public let resetsAt: Date?
+        public init(group: String, window: String, remainingPercent: Double, resetsAt: Date? = nil) {
+            self.group = group; self.window = window; self.remainingPercent = remainingPercent; self.resetsAt = resetsAt
+        }
+    }
+    public let status: Status
+    public let remainingPercent: Double?
+    public let groupName: String?
+    public let groupTitle: String?
+    public let windowTitle: String?
+    public let resetsAt: Date?
+    public let checkedAt: Date
+    public let message: String
+    /// Every window the official panel listed; the tightest fields above summarise these.
+    public let windows: [Window]
+    public init(status: Status, remainingPercent: Double? = nil, groupName: String? = nil, checkedAt: Date = Date(), message: String = "", groupTitle: String? = nil, windowTitle: String? = nil, resetsAt: Date? = nil, windows: [Window] = []) {
+        self.status = status; self.remainingPercent = remainingPercent; self.groupName = groupName
+        self.checkedAt = checkedAt; self.message = message
+        self.groupTitle = groupTitle; self.windowTitle = windowTitle; self.resetsAt = resetsAt
+        self.windows = windows
+    }
+}
+
+/// Only accepts an explicitly labelled remaining percentage column. A changed or
+/// unrecognised official terminal layout is unknown, never zero or an estimate.
+public enum AgyQuotaParser {
+    public static func parse(_ output: String, now: Date = Date()) -> AgyQuotaReading {
+        let plain = output
+            .replacingOccurrences(of: "\u{1B}\\][^\\u0007]*(?:\\u0007|\u{1B}\\\\)", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\u{1B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+        let lower = plain.lowercased()
+        if lower.contains("not signed in") || lower.contains("sign in to") || lower.contains("log in to") {
+            return .init(status: .signInRequired, checkedAt: now, message: "请先在官方 agy CLI 登录")
+        }
+        if lower.contains("do you trust") || lower.contains("enter confirm") || lower.contains("permission required") {
+            return .init(status: .confirmationRequired, checkedAt: now, message: "官方 CLI 需要交互确认")
+        }
+        guard lower.contains("quota"), lower.contains("within each group"), lower.contains("5-hour limit") else { return .init(status: .unknown, checkedAt: now, message: "未识别官方额度面板") }
+        var group: String?
+        var window: String?
+        var candidates: [(Double, String, String, Date?)] = []
+        var unpairedPercent = false
+        for line in plain.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = trimmed.lowercased()
+            if text == "gemini models" { group = "Gemini"; window = nil }
+            else if text == "claude and gpt models" { group = "Claude / GPT"; window = nil }
+            else if text.contains("argon") && trimmed == trimmed.uppercased() { group = "Gemini Argon"; window = nil }
+            else if trimmed == trimmed.uppercased(), trimmed.range(of: "[A-Z]", options: .regularExpression) != nil { group = nil; window = nil }
+            if text == "gemini 4 argon weekly limit" { group = "Gemini Argon"; window = "每周" }
+            if text.hasPrefix("refreshes in "), !candidates.isEmpty {
+                let parts = text.replacingOccurrences(of: "refreshes in ", with: "").split(separator: " ")
+                var seconds: Double = 0
+                var valid = !parts.isEmpty
+                for part in parts {
+                    guard let suffix = part.last, let number = Double(part.dropLast()), number >= 0 else { valid = false; break }
+                    switch suffix { case "d": seconds += number * 86400; case "h": seconds += number * 3600; case "m": seconds += number * 60; case "s": seconds += number; default: valid = false }
+                }
+                if valid { candidates[candidates.count - 1].3 = now.addingTimeInterval(seconds) }
+            }
+            if text == "weekly limit remaining" { window = "每周" }
+            else if text == "five hour limit remaining" { window = "五小时" }
+            guard trimmed.contains("%") else { continue }
+            // Only the bar line immediately following an explicit remaining label.
+            guard let group, let label = window,
+                  let range = trimmed.range(of: "[0-9]+(?:\\.[0-9]+)?%$", options: .regularExpression),
+                  trimmed.hasPrefix("["),
+                  let value = Double(trimmed[range].dropLast()), value.isFinite, (0...100).contains(value) else {
+                unpairedPercent = true; continue
+            }
+            candidates.append((value, group, label, nil)); window = nil
+        }
+        let required = Set(["Gemini · 每周", "Gemini · 五小时", "Claude / GPT · 每周", "Claude / GPT · 五小时"])
+        let received = Set(candidates.map { $0.1 + " · " + $0.2 })
+        guard required.isSubset(of: received), !unpairedPercent, let tightest = candidates.min(by: { $0.0 < $1.0 }) else {
+            return .init(status: .unknown, checkedAt: now, message: "官方额度格式未确认，未推算百分比")
+        }
+        return .init(status: .available, remainingPercent: tightest.0, groupName: tightest.1 + " · " + tightest.2, checkedAt: now, message: "官方 CLI 剩余额度", groupTitle: tightest.1, windowTitle: tightest.2, resetsAt: tightest.3,
+                     windows: candidates.map { AgyQuotaReading.Window(group: $0.1, window: $0.2, remainingPercent: $0.0, resetsAt: $0.3) })
+    }
+}

@@ -12,21 +12,31 @@ if [[ "${UNIVERSAL:-}" == 1 ]]; then
     # 命令行工具里没有 XCBuild，--arch 两个一起编不了，只能按 triple 各编一次再用 lipo 合并。
     # 下面渲染图标用本机架构的那份（BIN），不用再单独编一次本机的
     bins=()
+    launcher_bins=()
     for arch in arm64 x86_64; do
         triple="$arch-apple-macosx14.0"
         swift build -c release --product QuotaPet --triple "$triple"
+        swift build -c release --product QuotaPetLauncher --triple "$triple"
+        launcher_bins+=("$(swift build -c release --triple "$triple" --show-bin-path)/QuotaPetLauncher")
         bin="$(swift build -c release --triple "$triple" --show-bin-path)/QuotaPet"
         bins+=("$bin")
         if [[ "$arch" == "$(uname -m)" ]]; then BIN="$bin"; fi
     done
     lipo -create "${bins[@]}" -output "$APP/Contents/MacOS/QuotaPet"
+    lipo -create "${launcher_bins[@]}" -output "$APP/Contents/MacOS/QuotaPetLauncher"
 else
     swift build -c release --product QuotaPet
     BIN="$(swift build -c release --show-bin-path)/QuotaPet"
     cp "$BIN" "$APP/Contents/MacOS/QuotaPet"
+    swift build -c release --product QuotaPetLauncher
+    cp "$(dirname "$BIN")/QuotaPetLauncher" "$APP/Contents/MacOS/QuotaPetLauncher"
 fi
 # 去掉调试符号：链接器会把编译时每个 .o 的本机绝对路径（带用户名）记在里面，发出去的包不能带
-strip -S "$APP/Contents/MacOS/QuotaPet"
+strip -S "$APP/Contents/MacOS/QuotaPet" "$APP/Contents/MacOS/QuotaPetLauncher"
+mkdir -p "$APP/Contents/Library/LaunchAgents"
+cp Resources/dev.quotapet.launcher.plist "$APP/Contents/Library/LaunchAgents/"
+codesign --force --sign - "$APP/Contents/MacOS/QuotaPetLauncher"
+cp Resources/quotapet-shell.sh "$APP/Contents/Resources/quotapet-shell.sh"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp -R Resources/*.lproj "$APP/Contents/Resources/"  # 各语言的 App 名字（访达、通知里显示的）
 # 精绘宠物的图（design/painted/export_painted.py 导出）：按清单一张张拷，不整个目录拷。
@@ -45,6 +55,21 @@ for config in design/painted/*.json; do
         done
     done
 done
+
+# agy 专属静态头像：仅复制清单里登记的 PNG（必需的三十张 + 已补的状态图），不复制参考图或整个目录。
+mkdir -p "$APP/Contents/Resources/Pets/agy"
+while IFS= read -r name; do
+    src="Resources/Pets/agy/$name.png"
+    [[ -f "$src" ]] || { echo "❌ 缺 agy 静态图：$src"; exit 1; }
+    cp "$src" "$APP/Contents/Resources/Pets/agy/"
+done < <(bash scripts/agy-asset-names.sh)
+# 补充的状态图：有就带上（必须是 PNG），没有不报错
+while IFS= read -r name; do
+    src="Resources/Pets/agy/$name.png"
+    [[ -f "$src" ]] || continue
+    file --brief --mime-type "$src" | grep -qx 'image/png' || { echo "❌ agy 补充图不是 PNG：$src"; exit 1; }
+    cp "$src" "$APP/Contents/Resources/Pets/agy/"
+done < <(bash scripts/agy-asset-names.sh --optional)
 
 # 用经典款的宠物生成 App 图标（大图标用 Resources/AppIcon.png，它不拷进 App 包）
 "$BIN" --render-icon build/AppIcon.iconset

@@ -45,9 +45,14 @@ expect_pass "普通文字" text "你好，用 ~/Library 就行"
 
 # --- 目录（发布包解压出来的样子） ---
 app="$work/good/QuotaPet.app/Contents"
-mkdir -p "$app/MacOS" "$app/Resources/Pets/classic"
+mkdir -p "$app/MacOS" "$app/Resources/Pets/classic" "$app/Resources/Pets/agy"
 printf 'binary-ish\0data' >"$app/MacOS/QuotaPet"
 printf 'png' >"$app/Resources/Pets/classic/portrait-sleep.png"
+# 完整的合成发布样本：有效 1×1 PNG，让负例因各自的问题失败，而非共同缺图。
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 --decode >"$work/pixel.png"
+while IFS= read -r name; do
+    cp "$work/pixel.png" "$app/Resources/Pets/agy/$name.png"
+done < <(bash "$here/QuotaPet/scripts/agy-asset-names.sh")
 expect_pass "干净的 .app" "$scan" dir "$work/good"
 cp -R "$work/good" "$work/bad1" && printf 'x\0%s\0y' "$other_path" >"$work/bad1/QuotaPet.app/Contents/MacOS/QuotaPet"
 expect_block "可执行文件（二进制）里的本机路径" "$scan" dir "$work/bad1"
@@ -68,6 +73,14 @@ if command -v ditto >/dev/null; then
     pack() { (cd "$1" && ditto -c -k --norsrc --noextattr --keepParent QuotaPet.app "$2"); }
     pack "$work/good" "$work/good.zip"
     expect_pass "干净的压缩包" "$release" "$work/good.zip"
+    cp -R "$work/good" "$work/missing-agy"
+    rm "$work/missing-agy/QuotaPet.app/Contents/Resources/Pets/agy/pilot-menu-tired.png"
+    pack "$work/missing-agy" "$work/missing-agy.zip"
+    expect_block "压缩包缺少 agy 必需图" "$release" "$work/missing-agy.zip"
+    cp -R "$work/good" "$work/old-agy"
+    cp "$work/pixel.png" "$work/old-agy/QuotaPet.app/Contents/Resources/Pets/agy/aurora-menu.png"
+    pack "$work/old-agy" "$work/old-agy.zip"
+    expect_block "压缩包含旧 agy 文件名" "$release" "$work/old-agy.zip"
     pack "$work/bad1b" "$work/bad1b.zip"
     expect_block "压缩包里非 UTF-8 二进制里的本机路径" env LC_ALL=en_US.UTF-8 "$release" "$work/bad1b.zip"
     pack "$work/bad1" "$work/bad1.zip"

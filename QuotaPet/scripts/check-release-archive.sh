@@ -26,12 +26,29 @@ if [[ "$top" != "QuotaPet.app" ]]; then
     echo "❌ 压缩包顶层应该只有 QuotaPet.app，实际有：$top" >&2
     rc=1
 fi
-extra=$(cd "$work/QuotaPet.app/Contents/Resources/Pets" 2>/dev/null && find . -type f | grep -vE '^\./[a-z]+/(portrait|icon)-[a-z-]+\.png$' || true)
+agy_names=$( { bash scripts/agy-asset-names.sh; bash scripts/agy-asset-names.sh --optional; } | paste -sd '|' -)
+extra=$(cd "$work/QuotaPet.app/Contents/Resources/Pets" 2>/dev/null && find . -type f | awk -v agy_names="$agy_names" '/^\.\/agy\// { if ($0 !~ ("^\\./agy/(" agy_names ")\\.png$")) print; next } $0 !~ /^\.\/[a-z]+\/(portrait|icon)-[a-z-]+\.png$/ { print }' || true)
 if [[ -n "$extra" ]]; then
-    echo "❌ 宠物图目录里有不是 portrait-/icon-<表情>.png 的文件：" >&2
+    echo "❌ 宠物图目录里有未登记的文件（旧样式仅允许 portrait-/icon-<表情>.png，agy 仅允许共享清单中的 30 张必需图和登记过的补充状态图）：" >&2
     printf '%s\n' "$extra" | sed 's/^/    /' >&2
     rc=1
 fi
+# agy 新绘图必须随最终归档发布；缺图或损坏的 PNG 不能仅靠文件名验收通过。
+while IFS= read -r name; do
+    asset="$work/QuotaPet.app/Contents/Resources/Pets/agy/$name.png"
+    if [[ ! -f "$asset" ]] || ! file --brief --mime-type "$asset" | grep -qx 'image/png'; then
+        echo "❌ 缺少或无效的 agy PNG：$name.png" >&2
+        rc=1
+    fi
+done < <(bash scripts/agy-asset-names.sh)
+# 补充状态图可以没有，但带了就必须是有效 PNG
+while IFS= read -r name; do
+    asset="$work/QuotaPet.app/Contents/Resources/Pets/agy/$name.png"
+    if [[ -f "$asset" ]] && ! file --brief --mime-type "$asset" | grep -qx 'image/png'; then
+        echo "❌ 无效的 agy 补充 PNG：$name.png" >&2
+        rc=1
+    fi
+done < <(bash scripts/agy-asset-names.sh --optional)
 hidden=$(cd "$work" && find . -name '.*' ! -name . | head -5)
 if [[ -n "$hidden" ]]; then
     echo "❌ 压缩包里有隐藏文件：" >&2

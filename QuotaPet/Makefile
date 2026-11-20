@@ -21,13 +21,14 @@ demo: app
 	@$(QUIT)
 	$(call OPEN,$(APP),--args --demo)
 
-# 在终端打印当前额度（和 usage_lab.py 对账用）
+# 列出三家官方查看入口
 dump:
 	swift run -c release QuotaPet --dump
 
 # 自检
 check:
 	swift run QuotaPetChecks
+	python3 scripts/check-shell-integration.py
 
 # 把宠物、菜单栏、面板渲染成 PNG 到 build/previews
 previews:
@@ -37,13 +38,13 @@ previews:
 relay-previews:
 	swift run -c release QuotaPet --render-relay-previews build/previews
 
-# 装到 ~/Applications 并打开「开机自动启动」：以后一打开 Claude 宠物就会出现
+# 装到 ~/Applications；启动方式由用户在菜单中选择，不自动注册登录项
 install: app
 	@$(QUIT)
 	mkdir -p ~/Applications
 	rm -rf ~/Applications/QuotaPet.app
 	cp -R $(APP) ~/Applications/
-	$(call OPEN,~/Applications/QuotaPet.app,--args --enable-login-item)
+	$(call OPEN,~/Applications/QuotaPet.app)
 
 # 发 GitHub Release 用：Apple 芯片 + Intel 通用版，压成 build/QuotaPet-<版本>.zip（版本号取 Info.plist）
 VERSION := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)

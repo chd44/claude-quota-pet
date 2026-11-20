@@ -127,11 +127,17 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
-            SwitchRow(tr("开机自动启动", "Launch at login"),
-                      subtitle: watchesCodex
-                          ? tr("开着才能在 Claude 或 Codex 打开时自动出现", "Lets the pet appear when Claude or Codex opens")
-                          : tr("开着才能在 Claude 打开时自动出现", "Lets the pet appear when Claude opens"),
+            SwitchRow(tr("随桌面 App 自动启动", "Launch with desktop apps"),
+                      subtitle: tr("轻量后台助手监听 Claude / Codex；手动退出后暂停，重新打开恢复。终端需安装 shell 集成。", "A lightweight helper watches Claude / Codex. Quitting pauses it until you reopen. Terminal use needs shell integration."),
+                      isOn: Binding(get: { settings.desktopAutoLaunch }, set: { settings.desktopAutoLaunch = $0 }))
+                .disabled(!settings.allowsSystemActions)
+            if let error = settings.desktopAutoLaunchError {
+                Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            SwitchRow(tr("登录时启动主程序", "Launch main app at login"),
+                      subtitle: tr("可选；保留你以前的选择，与随 App 启动独立", "Optional; preserves your previous choice, independently of app-triggered launch"),
                       isOn: Binding(get: { settings.launchAtLogin }, set: { settings.launchAtLogin = $0 }))
+                .disabled(!settings.allowsSystemActions)
             if settings.launchAtLoginNeedsApproval {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(tr("还要在「系统设置 → 通用 → 登录项」里允许 QuotaPet 才会生效",
@@ -275,7 +281,7 @@ struct SettingsView: View {
             }
             .buttonStyle(.link)
             .font(.system(size: 11))
-            .disabled(!FileManager.default.fileExists(atPath: IntervalArchive.defaultURL.path))
+            .disabled(!settings.allowsSystemActions || !FileManager.default.fileExists(atPath: IntervalArchive.defaultURL.path))
         }
         .padding(.leading, 2)
     }
