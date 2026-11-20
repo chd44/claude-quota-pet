@@ -167,3 +167,58 @@ func checkAgyPrimaryAndStates() {
     check(AgyQuotaPresentation.trendMood(reading: reading(95, 3, 0, at: now), history: [earlier], querying: false, now: now) == .exhausted,
           "快用完时照档位，不被变化覆盖")
 }
+
+/// 评审意见：agy 面板重画后只认现在这一屏；Claude Code 干完活的自动读取被限频时不丢
+func checkRedrawAndActivityRefresh() {
+    func panel(_ geminiWeekly: String, _ argon: String) -> String {
+        """
+        Models & Quota
+        GEMINI MODELS
+        Weekly Limit Remaining
+        [████░] \(geminiWeekly)
+        Five Hour Limit Remaining
+        [████] 81.00%
+        CLAUDE AND GPT MODELS
+        Weekly Limit Remaining
+        [████] 91.00%
+        Five Hour Limit Remaining
+        [████] 100.00%
+        Gemini 4 Argon Weekly Limit
+        [██░░] \(argon)
+        Within each group, models share a weekly limit and a 5-hour limit.
+        """.replacingOccurrences(of: "\n", with: "\r\n")
+    }
+    let now = Date(timeIntervalSince1970: 30_000)
+    var screen = VirtualTerminal(rows: 70, columns: 220)
+    screen.feed(panel("62.50%", "24.25%"))
+    screen.feed("\u{1B}[2J\u{1B}[H" + panel("40.00%", "70.00%"))
+    let reading = AgyQuotaParser.parse(terminal: screen, now: now)
+    check(reading.status == .available && reading.windows.count == 5, "agy 面板清屏重画后只读现在这一屏（5 个窗口，不是 10 个）")
+    check(reading.windows.first?.remainingPercent == 40 && reading.remainingPercent == 40, "agy 取重画后的新数字，不保留旧帧的最低值")
+    check(Set(reading.windows.map { $0.group + $0.window }).count == reading.windows.count, "agy 窗口不重复（面板里的 id 唯一）")
+    var banner = VirtualTerminal(rows: 70, columns: 220)
+    banner.feed("Welcome to the Antigravity CLI. You are currently not signed in.\r\n> /usage\r\n" + panel("51.83%", "34.19%"))
+    check(AgyQuotaParser.parse(terminal: banner, now: now).status == .available,
+          "agy 启动横幅写着「not signed in」但下面有额度面板时，以面板为准")
+    check(AgyQuotaParser.parse("Welcome to the Antigravity CLI. You are currently not signed in.", now: now).status == .signInRequired,
+          "没有额度面板、只有未登录提示时才判为需要登录")
+    var partial = VirtualTerminal(rows: 70, columns: 220)
+    partial.feed(panel("62.50%", "24.25%"))
+    partial.feed("\u{1B}[4;9H40.00%")  // 只局部重画一个数字
+    check(AgyQuotaParser.parse(terminal: partial, now: now).windows.first?.remainingPercent == 40, "agy 局部重画的数字按新值读")
+
+    let t = Date(timeIntervalSince1970: 40_000)
+    let quiet = AgyRefreshPolicy.activityQuiet
+    check(ActivityRefresh.step(now: t.addingTimeInterval(10), lastActivity: t, latestReadingAt: t.addingTimeInterval(-60), querying: false) == .wait,
+          "刚在干活、上次读数不到 3 分钟前：先等")
+    check(ActivityRefresh.step(now: t.addingTimeInterval(quiet), lastActivity: t, latestReadingAt: t.addingTimeInterval(-60), querying: false) == .refresh,
+          "活动停下就去读（即使上次读数才 1 分钟前，被限频时下次检查再试）")
+    check(ActivityRefresh.step(now: t.addingTimeInterval(quiet + 15), lastActivity: t, latestReadingAt: t.addingTimeInterval(-60), querying: false) == .refresh,
+          "被限频拒绝后不结束，继续尝试")
+    check(ActivityRefresh.step(now: t.addingTimeInterval(quiet), lastActivity: t, latestReadingAt: t.addingTimeInterval(-60), querying: true) == .wait,
+          "正在读时等它读完")
+    check(ActivityRefresh.step(now: t.addingTimeInterval(quiet + 30), lastActivity: t, latestReadingAt: t.addingTimeInterval(quiet + 20), querying: false) == .done,
+          "活动之后读到了新读数：这一轮结束")
+    check(ActivityRefresh.step(now: t.addingTimeInterval(20), lastActivity: t, latestReadingAt: t.addingTimeInterval(-200), querying: false) == .refresh,
+          "一直在干活、离上次读数超过 3 分钟：也读一次")
+}

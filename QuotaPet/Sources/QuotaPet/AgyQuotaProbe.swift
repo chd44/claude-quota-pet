@@ -56,6 +56,8 @@ struct AgyQuotaProbe: Sendable {
             process.waitUntilExit()
         }
         var output = Data(), sent = false, trusted = false
+        // 面板会局部重画：按伪终端同样的行列数还原「现在屏幕上显示的」，只解析这一屏，旧帧不会混进来
+        var terminalScreen = VirtualTerminal(rows: Int(size.ws_row), columns: Int(size.ws_col))
         let start = Date()
         var readyAt = start.addingTimeInterval(2)
         var lastByte = Date()
@@ -65,6 +67,7 @@ struct AgyQuotaProbe: Sendable {
             let count = Darwin.read(master, &chunk, chunk.count)
             if count > 0 {
                 output.append(contentsOf: chunk.prefix(count)); lastByte = Date()
+                terminalScreen.feed(Array(chunk.prefix(count)))
                 guard output.count < 1_000_000 else { return .init(status: .unknown, message: "官方终端输出超出安全上限") }
             }
             let screen = String(decoding: output, as: UTF8.self)
@@ -83,7 +86,7 @@ struct AgyQuotaProbe: Sendable {
                     output.removeAll(); sent = true; lastByte = Date()
                 }
             } else if Date().timeIntervalSince(lastByte) > 1.0 {
-                let reading = AgyQuotaParser.parse(screen)
+                let reading = AgyQuotaParser.parse(terminal: terminalScreen)
                 if reading.status != .unknown { return reading }
             }
             try? await Task.sleep(nanoseconds: 100_000_000)

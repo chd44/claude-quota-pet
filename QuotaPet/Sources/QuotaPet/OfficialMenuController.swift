@@ -327,7 +327,8 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
     /// Claude（CLI 读数，按现在的时间判断过期）+ Codex（日志读数）
     private func updateUsage() {
         let now = Date()
-        state.usage = (usageStore?.snapshots ?? []).filter { $0.provider == .codex }.map { CodexProvider.expiringStale($0, now: now) }
+        // Codex 的旧读数照样传给面板，由面板变灰显示（CodexProvider.isStale）
+        state.usage = (usageStore?.snapshots ?? []).filter { $0.provider == .codex }
             + [claudeSnapshot(now: now)]
         state.claudeQuerying = claudeMonitor.querying
         updateImage()
@@ -441,7 +442,8 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         let entry = choice.entry
         let presentation = AgyQuotaPresentation(reading: choice.isAntigravity ? agyMonitor.reading : nil, now: now)
         let snapshot = state.usage.first { $0.provider == (entry == .claude ? .claude : .codex) }
-        let mood = OfficialOverviewView.artMood(entry: entry, snapshot: entry == .antigravity ? nil : snapshot,
+        let codexStale = entry == .codex && CodexProvider.isStale(snapshot, now: now)
+        let mood = codexStale ? .normal : OfficialOverviewView.artMood(entry: entry, snapshot: entry == .antigravity ? nil : snapshot,
                                                 agyReading: agyMonitor.reading, agyHistory: agyMonitor.history,
                                                 refreshing: entry == .antigravity ? agyMonitor.querying : entry == .claude && claudeMonitor.querying,
                                                 now: now)
@@ -458,7 +460,8 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
             limited = snapshot?.windows.contains { $0.percent >= 100 } ?? false
         }
         // 宽度按这个显示模式下最长的文字固定：头像钉在最左边、数字左对齐，切换时不左右挪，面板的角标也不动
-        let color: NSColor? = (text != nil && !limited && level >= 75) ? (level >= 90 ? .systemRed : .systemOrange) : nil
+        let color: NSColor? = codexStale ? .secondaryLabelColor  // 旧读数：数字变灰
+            : (text != nil && !limited && level >= 75) ? (level >= 90 ? .systemRed : .systemOrange) : nil
         let width = MenuBarLayout.width(mode: settings.menuBarText)
         if item.length != width { item.length = width }
         button.title = ""
@@ -527,21 +530,24 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         }
     }
 
-    /// 活动停下 45 秒后读一次；一直在写的话，最晚每 3 分钟也读一次（读不读由调度规则决定）
+    /// 活动停下 45 秒后读一次；一直在写的话，最晚每 3 分钟也读一次。
+    /// 被限频拒绝时不丢：每 15 秒再看一次，直到活动之后真的读到了新读数
     private func claudeActivity() {
-        let now = Date()
-        lastActivity = now
+        lastActivity = Date()
         guard activityTimer == nil else { return }
-        let timer = Timer(timeInterval: AgyRefreshPolicy.activityQuiet, repeats: true) { [weak self] timer in
+        let timer = Timer(timeInterval: ActivityRefresh.checkEvery, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
-                let quiet = Date().timeIntervalSince(self.lastActivity) >= AgyRefreshPolicy.activityQuiet
-                if quiet || self.claudeMonitor.history.last.map({ Date().timeIntervalSince($0.checkedAt) >= AgyRefreshPolicy.activityGap }) ?? true {
-                    self.claudeMonitor.refreshForActivity()
-                }
-                if quiet {
+                switch ActivityRefresh.step(now: Date(), lastActivity: self.lastActivity,
+                                            latestReadingAt: self.claudeMonitor.history.last?.checkedAt,
+                                            querying: self.claudeMonitor.querying) {
+                case .done:
                     timer.invalidate()
                     self.activityTimer = nil
+                case .refresh:
+                    self.claudeMonitor.refreshForActivity()
+                case .wait:
+                    break
                 }
             }
         }

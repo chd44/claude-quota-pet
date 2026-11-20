@@ -13,6 +13,12 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
     /// 云端任务可以在你不动的时候一直跑，所以不能等太久
     public static let staleAfter: TimeInterval = 3600
 
+    /// 正常模式：最近一次官方读数超过 staleAfter（1 小时）算旧读数。面板照样画出上次的数字，但整体变灰、标明时间，宠物用中性表情
+    public static func isStale(_ snapshot: UsageSnapshot?, now: Date) -> Bool {
+        guard let snapshot, snapshot.provider == .codex, snapshot.hasData, let readAt = snapshot.officialAt else { return false }
+        return now.timeIntervalSince(readAt) >= staleAfter
+    }
+
     /// 正常模式的过期规则：最近一次官方读数超过 staleAfter 就是未知，不拿旧读数当现在的额度（演示模式不用）
     public static func expiringStale(_ snapshot: UsageSnapshot, now: Date) -> UsageSnapshot {
         guard snapshot.provider == .codex, snapshot.hasData, let readAt = snapshot.officialAt,
