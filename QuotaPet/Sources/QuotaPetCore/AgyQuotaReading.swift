@@ -34,18 +34,28 @@ public struct AgyQuotaReading: Codable, Sendable {
 /// Only accepts an explicitly labelled remaining percentage column. A changed or
 /// unrecognised official terminal layout is unknown, never zero or an estimate.
 public enum AgyQuotaParser {
+    /// 从还原好的终端屏幕解析：只看现在显示的这一屏（局部重画、清屏后的旧帧不算）
+    public static func parse(terminal: VirtualTerminal, now: Date = Date()) -> AgyQuotaReading {
+        parse(terminal.lines.joined(separator: "\n"), now: now)
+    }
+
     public static func parse(_ output: String, now: Date = Date()) -> AgyQuotaReading {
         let plain = output
             .replacingOccurrences(of: "\u{1B}\\][^\\u0007]*(?:\\u0007|\u{1B}\\\\)", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
         let lower = plain.lowercased()
-        if lower.contains("not signed in") || lower.contains("sign in to") || lower.contains("log in to") {
-            return .init(status: .signInRequired, checkedAt: now, message: "请先在官方 agy CLI 登录")
+        // 额度面板在屏幕上就以面板为准：agy 启动横幅里即使已登录也会写「You are currently not signed in」，
+        // 还原整屏后它会留在面板上方，不能因此判成未登录
+        let hasPanel = lower.contains("quota") && lower.contains("within each group") && lower.contains("5-hour limit")
+        if !hasPanel {
+            if lower.contains("not signed in") || lower.contains("sign in to") || lower.contains("log in to") {
+                return .init(status: .signInRequired, checkedAt: now, message: "请先在官方 agy CLI 登录")
+            }
+            if lower.contains("do you trust") || lower.contains("enter confirm") || lower.contains("permission required") {
+                return .init(status: .confirmationRequired, checkedAt: now, message: "官方 CLI 需要交互确认")
+            }
+            return .init(status: .unknown, checkedAt: now, message: "未识别官方额度面板")
         }
-        if lower.contains("do you trust") || lower.contains("enter confirm") || lower.contains("permission required") {
-            return .init(status: .confirmationRequired, checkedAt: now, message: "官方 CLI 需要交互确认")
-        }
-        guard lower.contains("quota"), lower.contains("within each group"), lower.contains("5-hour limit") else { return .init(status: .unknown, checkedAt: now, message: "未识别官方额度面板") }
         var group: String?
         var window: String?
         var candidates: [(Double, String, String, Date?)] = []

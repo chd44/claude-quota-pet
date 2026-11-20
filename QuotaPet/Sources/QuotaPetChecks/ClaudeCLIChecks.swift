@@ -166,6 +166,8 @@ func checkRefreshAndExpiry() {
     let expired = CodexProvider.expiringStale(codex, now: now.addingTimeInterval(3600))
     check(!expired.hasData && expired.windows.isEmpty && expired.notes.count == 1, "Codex 读数超过 1 小时是未知并说明")
     check(MenuBarText.make(expired, mode: .tightest, now: now.addingTimeInterval(3600)).text.isEmpty, "Codex 过期时菜单栏不显示数字")
+    check(!CodexProvider.isStale(codex, now: now.addingTimeInterval(59 * 60)) && CodexProvider.isStale(codex, now: now.addingTimeInterval(3600)),
+          "Codex 读数超过 1 小时算旧读数（面板变灰显示，不清空）")
     let claude = UsageSnapshot(provider: .claude, windows: [window], generatedAt: now, officialAt: now, notes: [])
     check(CodexProvider.expiringStale(claude, now: now.addingTimeInterval(7200)).hasData, "Codex 的过期规则不动别家")
 

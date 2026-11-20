@@ -53,6 +53,9 @@ struct OfficialOverviewView: View {
         }
     }
 
+    /// Codex 的读数超过 1 小时：照样画出上次的数字，但整体变灰、标明时间
+    private func codexStale(_ now: Date) -> Bool { entry == .codex && CodexProvider.isStale(snapshot, now: now) }
+
     private var snapshot: UsageSnapshot? {
         switch entry {
         case .claude: return usage.first { $0.provider == .claude }
@@ -95,6 +98,7 @@ struct OfficialOverviewView: View {
                             .codex: Self.tightest(usage.first { $0.provider == .codex }),
                             .antigravity: AgyQuotaPresentation(reading: reading, now: now).primaryUsedPercent,
                          ],
+                         dimmed: CodexProvider.isStale(usage.first { $0.provider == .codex }, now: now) ? [.codex] : [],
                          onSelect: onSelect)
             // 切换页签：旧卡片立刻撤下（不和新卡片叠在一起），新卡片淡入；窗口高度由外面跟着平滑伸缩
             VStack(alignment: .leading, spacing: 14) {
@@ -110,11 +114,14 @@ struct OfficialOverviewView: View {
                 }
             case .claude, .codex:
                 if let snapshot, snapshot.hasData {
-                    // 旧总览的进度条卡片，只留大数字、进度条和重置时间；要提醒时才多一行
+                    // 旧总览的进度条卡片，只留大数字、进度条和重置时间；要提醒时才多一行。旧读数整体变灰
+                    let stale = codexStale(now)
                     VStack(spacing: 10) {
                         ForEach(snapshot.windows) { QuotaCard(window: $0, now: now) }
                     }
-                    NotesView(notes: snapshot.notes)
+                    .saturation(stale ? 0 : 1)
+                    .opacity(stale ? 0.55 : 1)
+                    if !stale { NotesView(notes: snapshot.notes) }
                 } else {
                     OfficialEntryCard(entry: entry, reason: snapshot?.notes.first) { onOpenOfficial(entry) }
                 }
@@ -137,7 +144,7 @@ struct OfficialOverviewView: View {
         case .antigravity:
             return agy.primaryUsedPercent == nil ? nil : agy.primaryMood
         case .claude, .codex:
-            guard let snapshot, snapshot.hasData else { return nil }
+            guard let snapshot, snapshot.hasData, !CodexProvider.isStale(snapshot, now: now) else { return nil }
             return PetStatus.of(snapshot, now: now, lateNight: false).mood
         }
     }
@@ -149,7 +156,9 @@ struct OfficialOverviewView: View {
         case .antigravity:
             return AgyQuotaPresentation.trendMood(reading: agyReading, history: agyHistory, querying: refreshing, now: now)
         case .claude, .codex:
-            if let snapshot, snapshot.hasData { return PetStatus.of(snapshot, now: now, lateNight: false).mood }
+            if let snapshot, snapshot.hasData, !CodexProvider.isStale(snapshot, now: now) {
+                return PetStatus.of(snapshot, now: now, lateNight: false).mood
+            }
             return refreshing ? .loading : .normal
         }
     }
@@ -256,6 +265,7 @@ struct OfficialOverviewView: View {
 
     private func badge(known: Bool, mood: PetMood) -> String {
         if known { return mood.title }
+        if entry == .codex, snapshot?.hasData == true { return tr("读数较旧", "Old reading") }
         if entry != .antigravity { return tr("额度未知", "Unknown") }
         return querying ? tr("读取中", "Reading") : tr("额度未知", "Unknown")
     }
@@ -273,6 +283,10 @@ struct OfficialOverviewView: View {
             guard let snapshot, snapshot.hasData else {
                 return Headline(title: tr("暂无可用的官方读数", "No usable official reading"), color: .secondary,
                                 detail: entry == .codex ? desktopText : nil)
+            }
+            if codexStale(now), let readAt = snapshot.officialAt {
+                return Headline(title: tr("读数是\(Fmt.ago(readAt, now: now))的", "Reading from \(Fmt.ago(readAt, now: now))"), color: .secondary,
+                                detail: tr("在本机用一次 Codex 就会更新", "Use Codex on this Mac to update it"))
             }
             // 和旧面板一样：先说最有用的一条（用完了、照这个速度何时见底、比平均节奏快…），再是她的一句话
             let status = PetStatus.of(snapshot, now: now, lateNight: false)
@@ -302,7 +316,7 @@ struct OfficialOverviewView: View {
                 : tr("\(top.group) \(short)已用 \(Fmt.percent(used))", "\(top.group) \(short): \(Fmt.percent(used)) used")
             return Headline(title: title,
                             color: used >= 90 ? Color(nsColor: .systemRed) : used >= 75 ? Color(nsColor: .systemOrange) : .primary,
-                            detail: tr("以 \(top.group) 为准 · 还剩 \(remaining)", "Based on \(top.group) · \(remaining) left"))
+                            detail: tr("\(top.group) 组 · 还剩 \(remaining)", "\(top.group) group · \(remaining) left"))
         }
     }
 
@@ -447,6 +461,8 @@ struct OfficialTabs: View {
     var selected: OfficialQuotaEntry
     /// 每家最紧张窗口的百分比；没有可靠的官方读数时没有
     var percents: [OfficialQuotaEntry: Double?] = [:]
+    /// 读数较旧的几家：数字变灰
+    var dimmed: Set<OfficialQuotaEntry> = []
     var onSelect: (OfficialQuotaEntry) -> Void
     @Namespace private var selection
     @Environment(\.colorScheme) private var colorScheme
@@ -457,13 +473,17 @@ struct OfficialTabs: View {
         if #available(macOS 26.0, *) {
             GlassEffectContainer(spacing: 4) {
                 segments { _ in
-                    // 选中态：不带颜色的明亮玻璃（带主题色在暗色下会发褐）
+                    // 选中态：不带颜色的明亮玻璃（带主题色在暗色下会发褐）；浅色下用实白加柔和阴影，才和轨道分得开
                     Capsule()
-                        .fill(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.55))
+                        .fill(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.95))
+                        .shadow(color: .black.opacity(colorScheme == .dark ? 0 : 0.14), radius: 2, y: 1)
                         .glassEffect(.regular.interactive(), in: .capsule)
                         .matchedGeometryEffect(id: "selected", in: selection)
                 }
                 .padding(3)
+                // 浅色背景上玻璃轨道几乎看不出来：加一层很淡的深色底和细描边
+                .background(Capsule().fill(Color.black.opacity(colorScheme == .dark ? 0 : 0.07)))
+                .overlay(Capsule().strokeBorder(Color.black.opacity(colorScheme == .dark ? 0 : 0.08), lineWidth: 0.5))
                 .glassEffect(.regular, in: .capsule)
             }
         } else {
@@ -484,7 +504,8 @@ struct OfficialTabs: View {
         }
         .padding(4)
         .background(Capsule().fill(.ultraThinMaterial))
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .background(Capsule().fill(Color.black.opacity(colorScheme == .dark ? 0 : 0.06)))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
     }
 
     private func segments<Pill: View>(@ViewBuilder pill: @escaping (OfficialQuotaEntry) -> Pill) -> some View {
@@ -505,7 +526,7 @@ struct OfficialTabs: View {
                         Text(percent.map { Fmt.percent($0) } ?? "–")
                             .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                             .monospacedDigit()
-                            .foregroundStyle(percent.map { Level.text($0) } ?? Color.secondary)
+                            .foregroundStyle(dimmed.contains(entry) ? Color.secondary : percent.map { Level.text($0) } ?? Color.secondary)
                             .contentTransition(.numericText())
                             .fixedSize()  // 名字和数字都不截断
                     }
@@ -613,13 +634,15 @@ struct AgyWindowRow: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                 if isPrimary {
-                    Text(tr("为准", "Primary"))
+                    Text(tr("菜单栏显示", "In menu bar"))
                         .font(.system(size: 9.5, weight: .semibold))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
                         .background(Capsule().fill(Level.bar(used ?? 0).opacity(0.16)))
                         .foregroundStyle(Level.bar(used ?? 0))
                         .fixedSize()
+                        .help(tr("菜单栏和切换条上的 agy 数字取的就是这个窗口（Gemini 组里用得最多的）",
+                                 "The agy number in the menu bar and tab bar comes from this window (the most-used one in the Gemini group)"))
                 }
                 Spacer()
                 if let used {

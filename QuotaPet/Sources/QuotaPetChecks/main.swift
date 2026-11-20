@@ -41,6 +41,7 @@ agyResetChecks()
 checkAgyQuotaParser()
 checkAgyPanelWindows()
 checkAgyPrimaryAndStates()
+checkRedrawAndActivityRefresh()
 checkClaudeCLIUsage()
 checkRefreshAndExpiry()
 
