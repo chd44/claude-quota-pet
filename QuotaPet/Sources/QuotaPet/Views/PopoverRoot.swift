@@ -52,7 +52,7 @@ struct PopoverRoot: View {
                 let shown = store.shown
                 let focus = store.focus?.provider
                 // 选中的那家没数据了（比如 Codex 的记录过期了）就回到宠物跟着的那家
-                let selected = shown.contains { $0.provider == state.selected } ? state.selected : focus ?? .claude
+                let selected = PanelSelection.resolve(shown: shown, requested: state.selected, focus: focus)
                 let snapshot = store.snapshot(for: selected)
                 // 心情和台词一次算出来。面板每次重画都按当前时间算；快照每分钟至少变一次（读取出错时还有 store.tick），和菜单栏同步
                 let status = PetStatus.of(snapshot, failed: store.errors[selected] != nil, memory: store.memory[selected] ?? PetMemory(),
@@ -83,7 +83,8 @@ struct PopoverRoot: View {
                         guard let poke = state.poke(mood: status.mood) else { return nil }
                         pet.react(mood: status.mood, annoyed: poke.annoyed)
                         return poke.line
-                    })
+                    },
+                    styleFor: { PetStyle.of($0, claudeStyle: settings.petStyle, codexStyle: settings.codexPetStyle) })
                     // 表情也按这次算的心情：标签、台词、戳的反应都是按它来的。看的是菜单栏上那家时就是菜单栏的 animator，
                     // 它平时只在新快照、每分钟时重算，面板在别的时候重画（比如跨过「刚恢复」「歇着」的时间门槛）会对不上一会儿
                     .onChange(of: look, initial: true) { _, look in

@@ -2179,6 +2179,163 @@ do {
     check(seen == Set(PetMood.allCases).subtracting([.confused, .loading]), "演示模式看得到的心情：\(seen.map(\.rawValue).sorted())")
 }
 
+// MARK: - 双宠接力 & 面板顶部信息
+
+/// 接力和顶部信息用到的窗口（现在 = 9 月 20 日 17:00）。official nil = 只有估算；readAgo：官方读数是多久前的；reset：多久以后重置，nil = 不知道
+func relayWindow(_ percent: Double, official: Double? = nil, readAgo: TimeInterval = 300, reset: TimeInterval? = hour,
+                 burn: Double? = nil, limit: Bool = false, now: Date) -> UsageWindow {
+    relayWindow("five_hour", percent, official: official, readAgo: readAgo, reset: reset, burn: burn, limit: limit, now: now)
+}
+
+func relayWindow(_ id: String, _ percent: Double, official: Double? = nil, readAgo: TimeInterval = 300, reset: TimeInterval? = hour,
+                 burn: Double? = nil, limit: Bool = false, now: Date) -> UsageWindow {
+    let duration = id == "seven_day" ? week : fiveHours
+    return UsageWindow(id: id, title: "", duration: duration, percent: percent, official: official,
+                       officialAt: official.map { _ in now - readAgo }, limitReported: limit,
+                       startedAt: reset.map { now + $0 - duration }, resetsAt: reset.map { now + $0 }, burnPerHour: burn,
+                       burnLookback: duration > 86400 ? 86400 : 1800)
+}
+
+func relaySnap(_ provider: ProviderID, _ windows: [UsageWindow], hasData: Bool = true, now: Date) -> UsageSnapshot {
+    UsageSnapshot(provider: provider, windows: windows, generatedAt: now, officialAt: windows.compactMap(\.officialAt).max(), hasData: hasData)
+}
+
+/// 下面这些输入在当前语言下的所有文字：「多语言」一节拿来查英文里有没有混进中文
+func relayTexts() -> [String] {
+    let now = at(20, 17)
+    let blocked = relaySnap(.claude, [relayWindow(100, official: 100, now: now)], now: now)
+    let forecast = relaySnap(.claude, [relayWindow(58, official: 52, readAgo: 540, reset: 3 * hour, burn: 60, now: now)], now: now)
+    let limited = relaySnap(.claude, [relayWindow(100, official: 100, limit: true, now: now)], now: now)
+    let both = relaySnap(.claude, [relayWindow(100, official: 100, now: now), relayWindow("seven_day", 100, official: 100, reset: 2 * 86400, now: now)], now: now)
+    var unknown = blocked
+    unknown.windows[0].resetsAt = nil
+    let steady = relaySnap(.claude, [relayWindow(27, official: 24, now: now), relayWindow("seven_day", 25, official: 25, reset: 4 * 86400, now: now)], now: now)
+    let stale = relaySnap(.claude, [relayWindow(27, official: 24, readAgo: 2 * 3600, now: now)], now: now)
+    let estimate = relaySnap(.claude, [relayWindow(27, now: now)], now: now)
+    var texts: [String] = []
+    for snapshot in [blocked, forecast, limited, both, unknown, steady, stale, estimate, relaySnap(.codex, steady.windows, now: now), relaySnap(.codex, stale.windows, now: now)] {
+        if let headline = PanelHeadline.of(snapshot, now: now) { texts += [headline.text, headline.detail ?? ""] }
+    }
+    let codexReady = relaySnap(.codex, [relayWindow(27, official: 27, readAgo: 480, now: now)], now: now)
+    let codexStale = relaySnap(.codex, [relayWindow(27, official: 27, readAgo: 2 * 3600, now: now)], now: now)
+    for other in [codexReady, codexStale] {
+        if let offer = RelayOffer.of(viewing: blocked, shown: [blocked, other], now: now) {
+            texts += [offer.line, offer.detail(now: now) ?? "", offer.buttonTitle, offer.staleText(now: now) ?? ""]
+        }
+    }
+    return texts
+}
+
+do {
+    let now = at(20, 17)
+    func w(_ percent: Double, official: Double? = nil, readAgo: TimeInterval = 300, reset: TimeInterval? = hour,
+           burn: Double? = nil, limit: Bool = false) -> UsageWindow {
+        relayWindow(percent, official: official, readAgo: readAgo, reset: reset, burn: burn, limit: limit, now: now)
+    }
+    func w(_ id: String, _ percent: Double, official: Double? = nil, readAgo: TimeInterval = 300, reset: TimeInterval? = hour,
+           burn: Double? = nil, limit: Bool = false) -> UsageWindow {
+        relayWindow(id, percent, official: official, readAgo: readAgo, reset: reset, burn: burn, limit: limit, now: now)
+    }
+    func snap(_ provider: ProviderID, _ windows: [UsageWindow], hasData: Bool = true) -> UsageSnapshot {
+        relaySnap(provider, windows, hasData: hasData, now: now)
+    }
+    func offer(_ viewing: UsageSnapshot, _ other: UsageSnapshot?, at date: Date? = nil, hidden: Set<ProviderID> = []) -> RelayOffer? {
+        let shown = UsageSnapshot.visible([viewing, other].compactMap { $0 }, hidden: hidden)
+        return RelayOffer.of(viewing: shown.first { $0.provider == viewing.provider }, shown: shown, now: date ?? now)
+    }
+    let claudeFull = snap(.claude, [w(100, official: 100), w("seven_day", 47, official: 47, reset: 4 * 86400)])
+    let codexOK = snap(.codex, [w(27, official: 27, readAgo: 8 * 60, reset: 3 * hour), w("seven_day", 18, official: 18, readAgo: 8 * 60, reset: 5 * 86400)])
+
+    // 已确认用完：只认属于当前窗口、仍有效的官方 100%（含限流消息），估算和预测不算；重置时间一到就不算了
+    check(w(100, official: 100).isConfirmedFull(now: now), "官方 100% 且还没到重置时间：已确认用完")
+    check(!w(100).isConfirmedFull(now: now), "只有估算到 100%：不算确认")
+    check(!w(99, official: 99.96, burn: 600).isConfirmedFull(now: now), "官方 99.96%：没到 100")
+    check(w(100, official: 100, reset: nil).isConfirmedFull(now: now), "不知道什么时候恢复：照样是用完了")
+    check(!w(100, official: 100, reset: -60).isConfirmedFull(now: now), "重置时间已经过了：恢复了，不算")
+    check(w(100, official: 100, limit: true).isConfirmedFull(now: now), "限流消息也算确认")
+
+    // 接力：当前这家确认用完、另一家新鲜又没满
+    var o = offer(claudeFull, codexOK)
+    check(o?.provider == .codex && o?.state == .ready(topPercent: 27, readAt: now - 480), "接力可用：看 Codex、最高 27%、读数 8 分钟前：\(String(describing: o))")
+    check(o?.buttonTitle == "查看 Codex" && o?.detail(now: now) == "Codex 最高已用 27% · 官方读数 8 分钟前", "接力文案：\(String(describing: o?.detail(now: now)))")
+    check(o?.line == "她先歇会儿，这边我帮你看着。", "接力台词")
+    check(o?.staleText(now: now) == nil, "接力可用时没有「上次读数」那行")
+    o = offer(snap(.codex, [w(100, official: 100, readAgo: 120)]), snap(.claude, [w(40, official: 40), w("seven_day", 30, official: 30, reset: 4 * 86400)]))
+    check(o?.provider == .claude, "Codex 用完了就提示去看 Claude：\(String(describing: o))")
+
+    // 没有确认用完就不接力（估算到头、预测要用完都不算）
+    check(offer(snap(.claude, [w(99, official: 95, burn: 30)]), codexOK) == nil, "只有趋势预警（99%、照这个速度要用完）：没有接力")
+    check(offer(snap(.claude, [w(100)]), codexOK) == nil, "只有估算到 100%：没有接力")
+    check(offer(snap(.claude, [w(27, official: 24)]), codexOK) == nil, "没用完：没有接力")
+    var h = PanelHeadline.of(snap(.claude, [w(99, official: 95, burn: 30)]), now: now)
+    check(h?.kind == .forecast && h?.text == "5 小时额度预计 17:02 用完", "只有趋势预警：顶部说预计几点用完：\(String(describing: h))")
+
+    // 另一家读数过期：按各家已有的标准（Claude 满 45 分钟，Codex 超过 1 小时），只留读数年龄
+    o = offer(claudeFull, snap(.codex, [w(27, official: 27, readAgo: 2 * 3600, reset: 3 * hour)]))
+    check(o?.state == .stale(readAt: now - 2 * 3600) && o?.staleText(now: now) == "Codex · 上次读数 2 小时前", "Codex 读数 2 小时前：只显示读数年龄：\(String(describing: o))")
+    check(o?.detail(now: now) == nil, "过期时没有台词那行和按钮用的文字")
+    func codexAge(_ age: TimeInterval) -> RelayOffer.State? { offer(claudeFull, snap(.codex, [w(27, official: 27, readAgo: age, reset: 3 * hour)]))?.state }
+    check(codexAge(3600) == .ready(topPercent: 27, readAt: now - 3600), "Codex 正好 1 小时：还算新鲜")
+    check(codexAge(3601) == .stale(readAt: now - 3601), "Codex 超过 1 小时：过期")
+    let claudeOther = { (age: TimeInterval) in
+        RelayOffer.of(viewing: snap(.codex, [w(100, official: 100)]), shown: [snap(.codex, [w(100, official: 100)]),
+                      snap(.claude, [w(30, official: 30, readAgo: age, reset: 3 * hour)])], now: now)?.state
+    }
+    check(claudeOther(44 * 60) == .ready(topPercent: 30, readAt: now - 44 * 60), "Claude 44 分钟：新鲜")
+    check(claudeOther(45 * 60) == .stale(readAt: now - 45 * 60), "Claude 满 45 分钟：过期")
+    // 新鲜度只看官方样本的时间，不看快照什么时候重算的
+    var justRefreshed = snap(.codex, [w(27, official: 27, readAgo: 2 * 3600, reset: 3 * hour)])
+    justRefreshed.generatedAt = now
+    justRefreshed.officialAt = now
+    check(offer(claudeFull, justRefreshed)?.state == .stale(readAt: now - 2 * 3600), "后台刚重算过，旧读数也不会变新")
+
+    // 另一家缺有效读数、没数据、也用完了、被隐藏：收起
+    check(offer(claudeFull, snap(.codex, [w(27)])) == nil, "另一家只有估算、没有官方读数：收起")
+    check(offer(claudeFull, snap(.codex, [], hasData: false)) == nil, "另一家没有数据：收起")
+    check(offer(claudeFull, nil) == nil, "只有一家：没有接力")
+    check(offer(claudeFull, snap(.codex, [w(100, official: 100, readAgo: 120, reset: 2 * hour), w("seven_day", 30, official: 30, reset: 4 * 86400)])) == nil,
+          "另一家也用完了：收起")
+    check(offer(claudeFull, snap(.codex, [w(100, official: 100, readAgo: 2 * 3600, reset: 2 * hour)])) == nil, "另一家读数过期、而且已经用完：收起")
+    check(offer(claudeFull, snap(.codex, [w(27, official: 27, readAgo: 120), w("seven_day", 100, official: 100, readAgo: 120, reset: 4 * 86400)])) == nil,
+          "另一家有一个窗口满了（别的没满）：收起")
+    check(offer(claudeFull, codexOK, hidden: [.codex]) == nil, "用户在设置里隐藏了另一家：没有接力")
+
+    // 重置后：同一张快照，到了重置时间接力和顶部的「用完」都收起
+    check(offer(claudeFull, codexOK, at: now + 3599) != nil, "离重置还差 1 秒：还在")
+    check(offer(claudeFull, codexOK, at: now + 3600) == nil, "重置时间一到：接力收起")
+    h = PanelHeadline.of(claudeFull, now: now + 3600)
+    check(h?.kind != .blocked && h?.text.contains("已用完") == false, "重置时间一到：顶部不再说用完了：\(String(describing: h))")
+
+    // 顶部信息：用完 > 预测 > 过期 / 缺读数 / 平稳
+    h = PanelHeadline.of(claudeFull, now: now)
+    check(h?.kind == .blocked && h?.text == "5 小时额度已用完 · 约 18:00 恢复" && h?.detail == "官方读数 100% · 5 分钟前", "用完了：\(String(describing: h))")
+    h = PanelHeadline.of(snap(.claude, [w(100, official: 100, reset: nil)]), now: now)
+    check(h?.text == "5 小时额度已用完 · 恢复时间未知", "恢复时间未知：\(String(describing: h))")
+    h = PanelHeadline.of(snap(.claude, [w(100, official: 100), w("seven_day", 100, official: 100, reset: nil)]), now: now)
+    check(h?.text == "5 小时额度、本周额度都已用完 · 恢复时间未知", "几个都满、有一个不知道：说不知道：\(String(describing: h))")
+    h = PanelHeadline.of(snap(.claude, [w(100, official: 100), w("seven_day", 100, official: 100, reset: 2 * 86400)]), now: now)
+    check(h?.text == "5 小时额度、本周额度都已用完 · 约 \(Fmt.clock(now + 2 * 86400, now: now)) 恢复", "几个都满：等最晚恢复的：\(String(describing: h))")
+    h = PanelHeadline.of(snap(.claude, [w(100, official: 100, limit: true)]), now: now)
+    check(h?.detail == "Claude Code 限流消息 · 5 分钟前", "限流消息报的用完：来源是限流消息：\(String(describing: h))")
+    h = PanelHeadline.of(snap(.claude, [w(58, official: 52, readAgo: 540, reset: 3 * hour, burn: 60)]), now: now)
+    check(h?.kind == .forecast && h?.text == "5 小时额度预计 17:42 用完" && h?.detail == "官方 52% · 9 分钟前 · 本机估算 +6 个百分点",
+          "有耗尽预测：\(String(describing: h))")
+    h = PanelHeadline.of(snap(.claude, [w(100, official: 100, burn: 60), w("seven_day", 50, official: 50, reset: 4 * 86400, burn: 5)]), now: now)
+    check(h?.kind == .blocked, "又用完又有预测：先说用完")
+    h = PanelHeadline.of(snap(.claude, [w(27, official: 24), w("seven_day", 25, official: 25, reset: 4 * 86400)]), now: now)
+    check(h?.kind == .steady && h?.text == "5 小时 27% · 本周 25%" && h?.detail == "官方 24% · 5 分钟前 · 本机估算 +3 个百分点", "平稳：额度概况：\(String(describing: h))")
+    h = PanelHeadline.of(snap(.claude, [w(27, official: 24, readAgo: 2 * 3600)]), now: now)
+    check(h?.kind == .stale && h?.text == "上次官方读数 · 2 小时前", "读数过期：显眼地写上次官方读数：\(String(describing: h))")
+    h = PanelHeadline.of(snap(.claude, [w(27)]), now: now)
+    check(h?.kind == .estimated && h?.text.contains("暂无官方读数") == true && h?.detail == "5 小时 27%", "缺官方读数：标注本机估算：\(String(describing: h))")
+    check(PanelHeadline.of(snap(.codex, [], hasData: false), now: now) == nil && PanelHeadline.of(nil, now: now) == nil, "没数据、还没算出来：没有顶部信息")
+
+    // 面板上看哪一家
+    let shown2 = [claudeFull, codexOK]
+    check(PanelSelection.resolve(shown: shown2, requested: .codex, focus: .claude) == .codex, "选了 Codex：保留用户的选择")
+    check(PanelSelection.resolve(shown: [claudeFull], requested: .codex, focus: .claude) == .claude, "Codex 不在显示的几家里：回到宠物跟着的那家")
+}
+
 // MARK: - 多语言
 
 check(Language.preferred(["zh-Hans-CN", "en-US"]) == .zhHans, "系统首选简体中文")
@@ -2268,6 +2425,8 @@ do {
                                  UsageAlerts.body($0, window: alertWindow, now: at(25, 12, 30))] }
     check(UsageAlerts.body(.runningOut(at(25, 12, 45)), window: alertWindow, now: at(25, 12, 30))
           == "At the recent pace it runs out around 12:45 (in about 15 min), 2 hr 15 min before the reset.", "英文预警")
+    english += relayTexts()
+    check(!relayTexts().isEmpty && relayTexts().count >= 20, "接力和顶部信息的英文样本太少：\(relayTexts().count)")
     english += talkInputs.flatMap { PetStatus.of($0.snapshot, failed: $0.failed, memory: $0.memory, now: $0.now, lateNight: $0.lateNight).lines }
     english += PetMood.allCases.flatMap { mood in (1...8).compactMap { PetTalk.poked(mood: mood, count: $0, streak: $0)?.line } }
     english += PetMood.allCases.flatMap { mood in (1...4).compactMap { PetTalk.poked(mood: mood, count: $0)?.line } }

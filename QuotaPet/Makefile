@@ -1,4 +1,4 @@
-.PHONY: app run demo dump check previews install release clean
+.PHONY: app run demo dump check previews relay-previews install release clean
 
 APP := build/QuotaPet.app
 
@@ -32,6 +32,10 @@ check:
 # 把宠物、菜单栏、面板渲染成 PNG 到 build/previews
 previews:
 	swift run -c release QuotaPet --render-previews build/previews
+
+# 双宠接力 + 面板顶部信息的三张预览图（只用合成数据）到 build/previews
+relay-previews:
+	swift run -c release QuotaPet --render-relay-previews build/previews
 
 # 装到 ~/Applications 并打开「开机自动启动」：以后一打开 Claude 宠物就会出现
 install: app

@@ -28,6 +28,9 @@ make release    # Apple 芯片 + Intel 通用版 zip（build/QuotaPet-<版本>.z
 
 - 现在有 Claude（`ClaudeProvider`）和 Codex（`CodexProvider`）两家。`UsageSnapshot.visible` 决定显示哪几家：Claude 一直在，别的有数据、用户又没在设置里关掉（`AppSettings.hiddenProviders`）才出现，所以没用过 Codex 时界面和只有 Claude 时一样。关掉的那家不显示、不发提醒（提醒的记录照常更新，重新打开时不会补发一堆）。
   - 设置页按「通用 / Claude / Codex」分页（`SettingsView.Page`），本机有 Codex 的记录时才有 Codex 页（和「显示」开关无关，不然关掉后就打不开了）。`UsageSnapshot.focus` 是宠物和菜单栏跟着的那家（最紧张的，一样时 Claude 优先）。
+  - 面板顶部先说一条最有用的信息（`PanelHeadline`，`QuotaPetCore/PanelHeadline.swift`，进自检）：已确认用完（`UsageWindow.isConfirmedFull`：官方 100% 读数或限流消息，估算、预测不算；已知重置时间到了就不算）> 有耗尽预测（和额度卡火焰行同一个 `projectedExhaustion`）> 读数过期 / 缺官方读数 / 平稳；下一行说读数来源和时间。`OverviewView` 在 `content(now:)` 里用 TimelineView 的 `now` 算，重置时间一到就收起，不要在外面用 `Date()` 算好传进来。窗口名说「5 小时额度」用 `quotaName`，卡片上还是 `displayTitle`。
+  - 双宠接力（`RelayOffer`，同一个文件）：正在看的这家有窗口确认用完，另一家（在 `shown` 里：已启用、有数据）有官方读数、读数没过期（`ProviderID.isOfficialStale`，标准是 `ClaudeProvider.staleAfter` / `CodexProvider.staleAfter`，只看官方样本时间 `officialReadAt`，不看 `generatedAt`）、所有窗口都没满，才出接力台词和「查看」按钮（走切换条同一个 `onSelect`，所以保留 `picked`）；读数过期只留「Codex · 上次读数 2 小时前」；没读数、没数据、也用完了（含过期且已满）、被隐藏时整块收起，只有一家时没有切换条也没有接力。台词是接力专用的，不进 `PetTalk.Situation`。
+  - 合成预览：`make relay-previews`（`--render-relay-previews`，`Tools/RelayPreviews.swift`）只用固定的合成数据和固定的「现在」，不读本机记录和设置，走的是和面板同一个 `OverviewView`；它还会往接力按钮上送一次真的鼠标按下 / 松开，验证点了之后选中的是 Codex（存成 `popover-relay-clicked.png`）。
   - 面板不止一家时顶部有切换条（`ProviderTabs`），每次打开先选 focus 那家；看的是 focus 时面板和菜单栏共用一个 `PetAnimator`，切到另一家时换成 `headerAnimator`。面板每次重画都把算出来的心情交给它用的那个 animator（`PetLook.onMenuBar`），表情和标签、台词才对得上。
   - 菜单栏不止一家时，数字前面加一个 SF Symbol 小图标（`MenuBarIcon`：星号是 Claude，终端是 Codex），和宠物画在同一张图里。
   - `@Published` 在赋值前就通知，`StatusItemController` 的订阅里要用传进来的新值，不能去读 `store` 的属性。

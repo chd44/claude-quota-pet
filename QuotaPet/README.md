@@ -17,6 +17,7 @@ make release    # 发 Release 用：Apple 芯片 + Intel 通用版，压成 buil
 make dump       # 在终端打印当前额度推算，和 usage_lab.py 对账
 make check      # 跑自检
 make previews   # 把宠物、菜单栏、面板渲染成 PNG，放到 build/previews（面板、设置页中英各一套）
+make relay-previews   # 双宠接力 + 面板顶部信息的三张预览（只用合成数据，不读本机数据和设置）
 ```
 
 第一次启动时，macOS 会问要不要允许「额度宠物」发通知，选允许才能收到用量提醒。选了不允许的话，设置页的「提醒」下面会提示，点「打开通知设置」就能改。

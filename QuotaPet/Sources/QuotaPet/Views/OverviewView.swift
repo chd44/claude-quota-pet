@@ -33,6 +33,10 @@ struct OverviewView<Pet: View>: View {
     var onSay: (PetTalk.Situation) -> Void = { _ in }
     /// 点了一下宠物：外面让她做个反应，返回她回的那句（没反应时是 nil）
     var onPoke: () -> String? = { nil }
+    /// 每家用哪个宠物形象（接力提示里画另一家的宠物）
+    var styleFor: (ProviderID) -> PetStyle = { PetStyle.of($0, claudeStyle: .classic, codexStyle: .dragon) }
+    /// 预览验证点击用：接力按钮的位置
+    var onRelayButtonFrame: (CGRect) -> Void = { _ in }
     /// 渲染预览图时固定「现在」
     var fixedNow: Date?
 
@@ -51,9 +55,10 @@ struct OverviewView<Pet: View>: View {
 
     private func content(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            header
+            header(now: now)
             if tabs.count > 1, let selected = snapshot?.provider {
                 ProviderTabs(snapshots: tabs, selected: selected, focus: focus, onSelect: onSelect)
+                relay(now: now)
             }
             if let snapshot, snapshot.hasData {
                 VStack(spacing: 8) {
@@ -76,8 +81,11 @@ struct OverviewView<Pet: View>: View {
         .padding(14)
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
+    /// 头部：宠物 + 名字和心情 + 最有用的一条信息（PanelHeadline）+ 读数来源 + 宠物一句短台词。
+    /// 刷新、设置按钮放在名字那一行，下面的文字才有够宽的地方
+    private func header(now: Date) -> some View {
+        let headline = PanelHeadline.of(snapshot, now: now)
+        return HStack(alignment: .top, spacing: 12) {
             Button {
                 guard let reply = onPoke() else { return }
                 pokedLine = reply
@@ -109,32 +117,74 @@ struct OverviewView<Pet: View>: View {
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Level.mood(mood).opacity(0.16)))
                         .foregroundStyle(Level.mood(mood))
+                    Spacer(minLength: 0)
+                    HStack(spacing: 0) {
+                        IconButton(systemName: "arrow.clockwise",
+                                   help: tr("重新读取本机数据（官方读数要等 Claude 桌面端下一次记录）",
+                                            "Reload local data (official readings wait for the Claude desktop app's next record)"),
+                                   rotation: refreshSpin) {
+                            onRefresh()
+                            withAnimation(.easeInOut(duration: 0.6)) { refreshSpin += 360 }
+                            refreshedAt = Date()
+                        }
+                        IconButton(systemName: "gearshape", help: tr("设置", "Settings"), action: onSettings)
+                    }
+                    .task(id: refreshedAt) {
+                        guard refreshedAt != nil else { return }
+                        try? await Task.sleep(nanoseconds: 4_000_000_000)
+                        if !Task.isCancelled { refreshedAt = nil }  // 4 秒内又点了一下时这个任务会被取消：别把新的那次提前清掉
+                    }
+                }
+                if let headline {
+                    Text(headline.text)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(headlineColor(headline.kind))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let detail = headline.detail {
+                        Text(detail)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Text(pokedLine ?? line)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(headline == nil ? .secondary : .tertiary)
                     .fixedSize(horizontal: false, vertical: true)  // 英文比较长，折行而不是截断
+                    .padding(.top, headline == nil ? 0 : 2)
                     .onChange(of: said, initial: true) { _, said in
                         if let said { onSay(said.situation) }
                     }
             }
             .padding(.leading, 4)
-            Spacer(minLength: 0)
-            HStack(spacing: 0) {
-                IconButton(systemName: "arrow.clockwise",
-                           help: tr("重新读取本机数据（官方读数要等 Claude 桌面端下一次记录）",
-                                    "Reload local data (official readings wait for the Claude desktop app's next record)"),
-                           rotation: refreshSpin) {
-                    onRefresh()
-                    withAnimation(.easeInOut(duration: 0.6)) { refreshSpin += 360 }
-                    refreshedAt = Date()
-                }
-                IconButton(systemName: "gearshape", help: tr("设置", "Settings"), action: onSettings)
-            }
-            .task(id: refreshedAt) {
-                guard refreshedAt != nil else { return }
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
-                if !Task.isCancelled { refreshedAt = nil }  // 4 秒内又点了一下时这个任务会被取消：别把新的那次提前清掉
+        }
+    }
+
+    private func headlineColor(_ kind: PanelHeadline.Kind) -> Color {
+        switch kind {
+        case .blocked: return Color(nsColor: .systemRed)
+        case .forecast, .stale: return Color(nsColor: .systemOrange)
+        case .estimated, .steady: return .primary
+        }
+    }
+
+    /// 双宠接力：正在看的这家有窗口确认用完时，另一家读数新鲜又没满就提示去看它；读数过期了只说读数有多旧；别的情况收起
+    @ViewBuilder private func relay(now: Date) -> some View {
+        if let offer = RelayOffer.of(viewing: snapshot, shown: tabs, now: now) {
+            switch offer.state {
+            case .ready:
+                let other = tabs.first { $0.provider == offer.provider }
+                let mood = PetStatus.of(other, now: now, lateNight: false).mood
+                RelayCard(offer: offer, now: now,
+                          picture: PetSprites.frames(for: mood, style: styleFor(offer.provider))[0].portrait,
+                          tint: Level.mood(mood), onOpen: { onSelect(offer.provider) },
+                          onButtonFrame: onRelayButtonFrame)
+            case .stale:
+                Label(offer.staleText(now: now) ?? "", systemImage: "clock")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 4)
             }
         }
     }
@@ -194,6 +244,60 @@ struct OverviewView<Pet: View>: View {
         if next > now { return tr("下次约 \(Fmt.clock(next, now: now))", "next around \(Fmt.clock(next, now: now))") }
         if now.timeIntervalSince(last) < ClaudeProvider.staleAfter { return tr("下一次随时会到", "the next one is due any moment") }
         return nil
+    }
+}
+
+/// 接力提示：另一只宠物的小头像 + 一句短台词 + 另一家的读数 + 「查看」按钮（走切换条同一个 onSelect）。
+/// 按钮用 plain 样式自己画：ImageRenderer 画不出系统样式的按钮
+struct RelayCard: View {
+    var offer: RelayOffer
+    var now: Date
+    var picture: PetPicture
+    var tint: Color
+    var onOpen: () -> Void
+    /// 渲染预览时验证点击用：告诉外面按钮在哪（面板里不用）
+    var onButtonFrame: (CGRect) -> Void = { _ in }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(nsImage: PetRenderer.image(picture))
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 40, height: 40)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tint.opacity(0.13)))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(offer.line)
+                    .font(.system(size: 12, weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let detail = offer.detail(now: now) {
+                    Text(detail)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 4)
+            Button(action: onOpen) {
+                Text(offer.buttonTitle)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .fixedSize()
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.16)))
+                    .foregroundStyle(Color.accentColor)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(offer.buttonTitle)
+            .background(GeometryReader { geo in
+                Color.clear.onAppear { onButtonFrame(geo.frame(in: .global)) }
+                    .onChange(of: geo.frame(in: .global)) { _, frame in onButtonFrame(frame) }
+            })
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.05)))
     }
 }
 
@@ -466,8 +570,8 @@ struct TodayCard: View {
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .monospacedDigit()
             }
-            Text(tr("\(today.requests) 次请求 · \(Fmt.tokens(today.tokens)) tokens · 按 API 价格折算",
-                    "\(plural(today.requests, "request")) · \(plural(today.tokens, "token", shown: Fmt.tokens(today.tokens))) · at API prices"))
+            Text(tr("金额按 API 价格折算 · \(today.requests) 次请求 · \(Fmt.tokens(today.tokens)) tokens",
+                    "Amounts at API prices · \(plural(today.requests, "request")) · \(plural(today.tokens, "token", shown: Fmt.tokens(today.tokens)))"))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             if !today.byFamily.isEmpty {

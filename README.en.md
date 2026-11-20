@@ -143,6 +143,7 @@ make run        # build QuotaPet.app into build/ and launch it
 make release    # universal build (Apple silicon + Intel) zipped for a GitHub Release
 make check      # run the self-checks
 make previews   # render the pet, menu bar and popover to PNGs in build/previews
+make relay-previews   # three previews of the two-pet relay and the popover headline (synthetic data only)
 ```
 
 **Using it on another Mac**: install it on each Mac, following the steps above. QuotaPet only reads files on the Mac it runs on, only goes online for the command-line fill-in (which you can turn off), and doesn't sync between devices, so each one shows what it can see:

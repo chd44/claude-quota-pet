@@ -8,6 +8,7 @@ import QuotaPetCore
 //   --dump                   在终端打印当前额度（只读本机文件），和 usage_lab.py 对账用
 //   --probe-cli              用 Claude 命令行查一次官方读数（会联网、占一个最小请求），调试用
 //   --render-previews <dir>  把宠物和面板渲染成 PNG
+//   --render-relay-previews <dir>  双宠接力和面板顶部信息的三张预览图（只用合成数据，不读本机数据和设置）
 //   --render-icon <dir>      生成 App 图标的 .iconset
 let arguments = CommandLine.arguments
 
@@ -29,6 +30,10 @@ if arguments.contains("--dump") {
 MainActor.assumeIsolated {
     if let dir = value(after: "--render-previews") {
         PreviewRenderer.renderAll(to: URL(fileURLWithPath: dir))
+        exit(0)
+    }
+    if let dir = value(after: "--render-relay-previews") {
+        RelayPreviews.renderAll(to: URL(fileURLWithPath: dir))
         exit(0)
     }
     if let dir = value(after: "--render-icon") {
