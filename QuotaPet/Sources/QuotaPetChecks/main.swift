@@ -44,6 +44,7 @@ checkAgyPrimaryAndStates()
 checkRedrawAndActivityRefresh()
 checkClaudeCLIUsage()
 checkRefreshAndExpiry()
+checkActiveServiceFollow()
 
 // Normal-mode appearance restores its saved choice without changing demo pet families.
 do {

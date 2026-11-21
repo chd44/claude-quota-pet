@@ -194,3 +194,31 @@ func checkRefreshAndExpiry() {
     let agyBack = (try? JSONEncoder().encode(agy)).flatMap { try? JSONDecoder().decode(AgyQuotaReading.self, from: $0) }
     check(agyBack?.windows == agy.windows && agyBack?.remainingPercent == 30, "agy 读数缓存能原样还原")
 }
+
+/// 自动跟随正在用的那家
+func checkActiveServiceFollow() {
+    let now = Date(timeIntervalSince1970: 60_000)
+    let minute: TimeInterval = 60
+    check(ActiveService.pick(lastActive: [:], used: [:], now: now) == nil, "没有一家在用：不动")
+    check(ActiveService.pick(lastActive: [.codex: now.addingTimeInterval(-11 * minute)], used: [.codex: 90], now: now) == nil,
+          "10 分钟前的动静不算正在用")
+    check(ActiveService.pick(lastActive: [.claude: now.addingTimeInterval(-2 * minute)], used: [.claude: 20], now: now) == .claude,
+          "只有一家在用：跟它")
+    check(ActiveService.pick(lastActive: [.claude: now.addingTimeInterval(-1 * minute), .antigravity: now.addingTimeInterval(-3 * minute)],
+                             used: [.claude: 40, .antigravity: 70], now: now) == .antigravity,
+          "几家同时在用：跟用得最紧的")
+    check(ActiveService.pick(lastActive: [.claude: now.addingTimeInterval(-1 * minute), .codex: now.addingTimeInterval(-3 * minute)],
+                             used: [.claude: 50, .codex: 50], now: now) == .claude,
+          "一样紧时跟最近有动静的")
+    check(ActiveService.pick(lastActive: [.claude: now.addingTimeInterval(-5 * minute), .codex: now.addingTimeInterval(-1 * minute)],
+                             used: [.claude: 30], now: now) == .claude,
+          "没有读数的那家排在有读数的后面")
+    check(ActiveService.active([.claude: now.addingTimeInterval(-5 * minute), .codex: now.addingTimeInterval(-1 * minute)], now: now) == [.codex, .claude],
+          "正在用的几家按最近有动静排序")
+    check(!ActiveService.mayFollow(enabled: true, panelOpen: true, manualAt: nil, now: now), "面板开着时不自动切换")
+    check(!ActiveService.mayFollow(enabled: true, panelOpen: false, manualAt: now.addingTimeInterval(-5 * minute), now: now),
+          "手动选了之后 10 分钟内不自动切换")
+    check(ActiveService.mayFollow(enabled: true, panelOpen: false, manualAt: now.addingTimeInterval(-11 * minute), now: now),
+          "手动选择满 10 分钟后恢复自动跟随")
+    check(!ActiveService.mayFollow(enabled: false, panelOpen: false, manualAt: nil, now: now), "关掉开关就不自动切换")
+}
