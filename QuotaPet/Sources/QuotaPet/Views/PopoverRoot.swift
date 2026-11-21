@@ -136,9 +136,16 @@ struct PetImage: View {
 
 /// 使用率对应的颜色
 enum Level {
+    /// 「还很充裕」的绿：浅色背景上系统亮绿太刺眼、看不清，换成沉稳一点、对比度更高的绿；深色下仍用系统绿
+    static let calmGreen = Color(nsColor: NSColor(name: "QuotaPetCalmGreen") { appearance in
+        appearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight]).map { [.darkAqua, .vibrantDark].contains($0) } == true
+            ? .systemGreen
+            : NSColor(srgbRed: 0.18, green: 0.58, blue: 0.33, alpha: 1)
+    })
+
     static func bar(_ percent: Double) -> Color {
         switch percent {
-        case ..<50: return Color(nsColor: .systemGreen)
+        case ..<50: return calmGreen
         case ..<75: return Color(nsColor: .systemYellow)
         case ..<90: return Color(nsColor: .systemOrange)
         default: return Color(nsColor: .systemRed)
@@ -155,7 +162,7 @@ enum Level {
 
     static func mood(_ mood: PetMood) -> Color {
         switch mood {
-        case .energetic, .revived: return Color(nsColor: .systemGreen)
+        case .energetic, .revived: return calmGreen
         case .normal: return Color(nsColor: .systemTeal)
         case .tired, .nervous: return Color(nsColor: .systemOrange)
         case .exhausted: return Color(nsColor: .systemRed)
