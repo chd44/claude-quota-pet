@@ -18,6 +18,8 @@ struct OfficialOverviewView: View {
     var agyStatus = ""
     /// Claude / Codex 的官方读数快照（ClaudeOfficialProvider / CodexProvider）
     var usage: [UsageSnapshot] = []
+    /// 正在用的几家：切换条上的小圆点带光晕
+    var activeEntries: Set<OfficialQuotaEntry> = []
     /// Claude / Codex 桌面端开着没有
     var desktopRunning = false
     var canOpenAntigravity = false
@@ -99,6 +101,7 @@ struct OfficialOverviewView: View {
                             .antigravity: AgyQuotaPresentation(reading: reading, now: now).primaryUsedPercent,
                          ],
                          dimmed: CodexProvider.isStale(usage.first { $0.provider == .codex }, now: now) ? [.codex] : [],
+                         active: activeEntries,
                          onSelect: onSelect)
             // 切换页签：旧卡片立刻撤下（不和新卡片叠在一起），新卡片淡入；窗口高度由外面跟着平滑伸缩
             VStack(alignment: .leading, spacing: 14) {
@@ -457,6 +460,8 @@ struct OfficialTabs: View {
     var percents: [OfficialQuotaEntry: Double?] = [:]
     /// 读数较旧的几家：数字变灰
     var dimmed: Set<OfficialQuotaEntry> = []
+    /// 正在用的几家（最近 10 分钟有动静）
+    var active: Set<OfficialQuotaEntry> = []
     var onSelect: (OfficialQuotaEntry) -> Void
     @Namespace private var selection
     @Environment(\.colorScheme) private var colorScheme
@@ -512,7 +517,10 @@ struct OfficialTabs: View {
                 } label: {
                     HStack(spacing: 5) {
                         Circle().fill(Self.tint(entry)).frame(width: 6, height: 6)
-                            .opacity(on ? 1 : 0.7)
+                            .opacity(on || active.contains(entry) ? 1 : 0.7)
+                            // 正在用：圆点外一圈同色光晕
+                            .background(Circle().fill(Self.tint(entry).opacity(active.contains(entry) ? 0.3 : 0)).frame(width: 12, height: 12))
+                            .help(active.contains(entry) ? tr("\(entry.serviceName) 正在用", "\(entry.serviceName) is in use") : "")
                         Text(entry.tabName)
                             .font(.system(size: 12, weight: on ? .semibold : .medium))
                             .foregroundStyle(on ? .primary : .secondary)

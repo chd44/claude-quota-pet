@@ -17,6 +17,8 @@ final class OfficialPanelState: ObservableObject {
     @Published var agyHistory: [AgyQuotaReading] = []
     /// 正在用官方 CLI 读 Claude
     @Published var claudeQuerying = false
+    /// 正在用的几家（ActiveService.window 内有动静），切换条上的小圆点带光晕
+    @Published var activeEntries: Set<OfficialQuotaEntry> = []
     @Published var querying = false
     @Published var agyStatus = ""
     @Published var runningApps: Set<String> = []
@@ -50,7 +52,7 @@ struct OfficialPanelRoot: View {
                 OfficialOverviewView(entry: entry, choice: settings.officialPetChoice, artwork: artwork,
                                      reading: state.reading, agyHistory: state.agyHistory,
                                      querying: state.querying, agyStatus: state.agyStatus,
-                                     usage: state.usage,
+                                     usage: state.usage, activeEntries: state.activeEntries,
                                      desktopRunning: state.runningApps.contains(desktopID),
                                      canOpenAntigravity: canOpenAntigravity,
                                      onSelect: onSelect, onOpenOfficial: onOpenOfficial, onOpenAntigravity: onOpenAntigravity,
@@ -90,10 +92,18 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
     private let claudeMonitor: ClaudeQuotaMonitor
     /// Codex 的官方读数：只读日志里服务器给的 rate_limits，不估算
     private let usageStore: UsageStore?
-    /// 监听 Claude Code 的对话文件有没有写入（只看文件事件，不读内容），用来在干完活后自动读一次官方额度
-    private var activityWatcher: FileWatcher?
-    private var activityTimer: Timer?
-    private var lastActivity = Date.distantPast
+    /// Claude Code / agy 有没有在干活：只看对话目录的文件事件，不读内容。用来干完活后自动重读额度、跟随正在用的那家
+    private lazy var claudeActivity = ActivityWatch(
+        paths: [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects").path],
+        isRelevant: { $0.hasSuffix(".jsonl") && !$0.contains("-QuotaPet-ClaudeQuotaCheck") })
+    private lazy var agyActivity = ActivityWatch(
+        paths: [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".gemini/antigravity-cli/conversations").path,
+                FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".gemini/antigravity").path],
+        isRelevant: { _ in true })
+    /// 每家最近一次有动静的时间；手动选过哪家的时间；正在自动切换（不算手动）
+    private var lastActive: [OfficialQuotaEntry: Date] = [:]
+    private var manualAt: Date?
+    private var autoSwitching = false
     private var subscriptions: Set<AnyCancellable> = []
     private var menuTracking = false
     private var revealPending = false
@@ -122,7 +132,9 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         agyMonitor.select(true)
         claudeMonitor.select(true)
         updateReading()
-        settings.$officialPetChoice.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in
+        settings.$officialPetChoice.dropFirst().sink { [weak self] _ in
+            // 不是自动跟随切过去的，就是用户自己选的：之后 10 分钟内不自动切走
+            if self?.autoSwitching == false { self?.manualAt = Date() }
             DispatchQueue.main.async { self?.updateImage() }
         }.store(in: &subscriptions)
         settings.$menuBarText.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateImage() }
@@ -134,12 +146,23 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         }.store(in: &subscriptions)
         // 每分钟兜底一次：读数过期、重置时间到了，面板和菜单栏要跟着变
         usageStore?.$tick.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in
-            self?.watchClaudeActivity()  // ~/.claude/projects 启动时还不存在的话，之后补上
+            if self?.settings.allowsSystemActions == true { self?.watchActivity() }  // 目录启动时还不存在的话，之后补上
+            self?.followActive()
             self?.updateUsage()
         }
             .store(in: &subscriptions)
         usageStore?.start()
-        watchClaudeActivity()
+        if settings.allowsSystemActions {
+            claudeActivity.onActivity = { [weak self] in self?.noteActive(.claude) }
+            claudeActivity.refresh = { [weak self] in self?.claudeMonitor.refreshForActivity() }
+            claudeActivity.latestReadingAt = { [weak self] in self?.claudeMonitor.history.last?.checkedAt }
+            claudeActivity.querying = { [weak self] in self?.claudeMonitor.querying ?? false }
+            agyActivity.onActivity = { [weak self] in self?.noteActive(.antigravity) }
+            agyActivity.refresh = { [weak self] in self?.agyMonitor.refreshForActivity() }
+            agyActivity.latestReadingAt = { [weak self] in self?.agyMonitor.history.last?.checkedAt }
+            agyActivity.querying = { [weak self] in self?.agyMonitor.querying ?? false }
+            watchActivity()
+        }
         NSWorkspace.shared.publisher(for: \.runningApplications).receive(on: RunLoop.main).sink { [weak self] apps in
             self?.state.runningApps = Set(apps.filter { !$0.isTerminated }.compactMap(\.bundleIdentifier))
         }.store(in: &subscriptions)
@@ -331,6 +354,8 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         state.usage = (usageStore?.snapshots ?? []).filter { $0.provider == .codex }
             + [claudeSnapshot(now: now)]
         state.claudeQuerying = claudeMonitor.querying
+        // Codex 每轮对话结束记一次读数：新读数的时间就是它最近一次在用
+        if let at = state.usage.first(where: { $0.provider == .codex })?.officialAt { noteActive(.codex, at: at) }
         updateImage()
     }
 
@@ -520,40 +545,38 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
     }
 
     /// ~/.claude/projects 里的 .jsonl 被写入 = Claude Code 正在干活。QuotaPet 自己查额度留下的会话不算
-    private func watchClaudeActivity() {
-        guard settings.allowsSystemActions, activityWatcher == nil else { return }
-        let projects = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects").path
-        activityWatcher = FileWatcher(paths: [projects]) { [weak self] events in
-            MainActor.assumeIsolated {
-                guard events.contains(where: { $0.path.hasSuffix(".jsonl") && !$0.path.contains("-QuotaPet-ClaudeQuotaCheck") }) else { return }
-                self?.claudeActivity()
-            }
-        }
+    /// 开始监听 Claude Code 和 agy 的对话写入（目录启动时还不存在的话，每分钟兜底时补上）
+    private func watchActivity() {
+        claudeActivity.start()
+        agyActivity.start()
     }
 
-    /// 活动停下 45 秒后读一次；一直在写的话，最晚每 3 分钟也读一次。
-    /// 被限频拒绝时不丢：每 15 秒再看一次，直到活动之后真的读到了新读数
-    private func claudeActivity() {
-        lastActivity = Date()
-        guard activityTimer == nil else { return }
-        let timer = Timer(timeInterval: ActivityRefresh.checkEvery, repeats: true) { [weak self] timer in
-            MainActor.assumeIsolated {
-                guard let self else { timer.invalidate(); return }
-                switch ActivityRefresh.step(now: Date(), lastActivity: self.lastActivity,
-                                            latestReadingAt: self.claudeMonitor.history.last?.checkedAt,
-                                            querying: self.claudeMonitor.querying) {
-                case .done:
-                    timer.invalidate()
-                    self.activityTimer = nil
-                case .refresh:
-                    self.claudeMonitor.refreshForActivity()
-                case .wait:
-                    break
-                }
-            }
-        }
-        activityTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+    /// 某家有了动静：记下时间，更新「正在用」，必要时自动切过去
+    private func noteActive(_ entry: OfficialQuotaEntry, at time: Date = Date()) {
+        if let previous = lastActive[entry], previous >= time { return }
+        lastActive[entry] = time
+        followActive()
+    }
+
+    /// 自动跟随正在用的那家（规则在 ActiveService）
+    private func followActive() {
+        let now = Date()
+        let active = Set(ActiveService.active(lastActive, now: now))
+        if state.activeEntries != active { state.activeEntries = active }
+        guard ActiveService.mayFollow(enabled: settings.autoFollowActive,
+                                      panelOpen: popover.isShown || floatingPanel?.isVisible == true,
+                                      manualAt: manualAt, now: now) else { return }
+        let codex = state.usage.first { $0.provider == .codex }
+        let used: [OfficialQuotaEntry: Double] = [
+            .claude: OfficialOverviewView.tightest(claudeSnapshot(now: now)),
+            .codex: CodexProvider.isStale(codex, now: now) ? nil : OfficialOverviewView.tightest(codex),
+            .antigravity: AgyQuotaPresentation(reading: agyMonitor.reading, now: now).primaryUsedPercent,
+        ].compactMapValues { $0 }
+        guard let target = ActiveService.pick(lastActive: lastActive, used: used, now: now),
+              target != settings.officialPetChoice.entry else { return }
+        autoSwitching = true
+        settings.selectOfficialEntry(target)
+        autoSwitching = false
     }
 
     /// 刷新按钮：Claude / agy 马上用官方 CLI 重读（两次之间至少 30 秒），Codex 重读本机日志
@@ -713,5 +736,59 @@ enum MenuBarLayout {
         }
         image.isTemplate = false
         return image
+    }
+}
+
+
+/// 监听某家对话目录的文件写入（只看事件，不读内容）：有动静时通知外面；停下 45 秒后读一次额度，
+/// 一直在写时最多每 3 分钟读一次，被限频拒绝时每 15 秒再试（规则在 ActivityRefresh）
+@MainActor
+final class ActivityWatch {
+    private let paths: [String]
+    private let isRelevant: (String) -> Bool
+    private var watcher: FileWatcher?
+    private var timer: Timer?
+    private var lastActivity = Date.distantPast
+    var onActivity: () -> Void = {}
+    var refresh: () -> Void = {}
+    var latestReadingAt: () -> Date? = { nil }
+    var querying: () -> Bool = { false }
+
+    init(paths: [String], isRelevant: @escaping (String) -> Bool) {
+        self.paths = paths
+        self.isRelevant = isRelevant
+    }
+
+    func start() {
+        guard watcher == nil else { return }
+        watcher = FileWatcher(paths: paths) { [weak self] events in
+            MainActor.assumeIsolated {
+                guard let self, events.contains(where: { self.isRelevant($0.path) }) else { return }
+                self.activity()
+            }
+        }
+    }
+
+    private func activity() {
+        lastActivity = Date()
+        onActivity()
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: ActivityRefresh.checkEvery, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                switch ActivityRefresh.step(now: Date(), lastActivity: self.lastActivity,
+                                            latestReadingAt: self.latestReadingAt(), querying: self.querying()) {
+                case .done:
+                    timer.invalidate()
+                    self.timer = nil
+                case .refresh:
+                    self.refresh()
+                case .wait:
+                    break
+                }
+            }
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 }

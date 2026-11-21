@@ -70,6 +70,10 @@ final class AppSettings: ObservableObject {
     @Published var showCodex: Bool {
         didSet { defaults.set(showCodex, forKey: Keys.showCodex) }
     }
+    /// 菜单栏和面板自动跟随正在用的那家（ActiveService）
+    @Published var autoFollowActive: Bool {
+        didSet { defaults.set(autoFollowActive, forKey: Keys.autoFollowActive) }
+    }
     @Published var animatePet: Bool {
         didSet { defaults.set(animatePet, forKey: Keys.animatePet) }
     }
@@ -123,6 +127,7 @@ final class AppSettings: ObservableObject {
         self.allowsSystemActions = allowsSystemActions
         defaults.register(defaults: [
             Keys.animatePet: true,
+            Keys.autoFollowActive: true,
             Keys.notificationsEnabled: true,
             Keys.thresholds: [75, 90, 100],
             Keys.notifyRunningOut: true,
@@ -153,6 +158,7 @@ final class AppSettings: ObservableObject {
             .flatMap { PetStyle.codexChoices.contains($0) ? $0 : nil } ?? PetStyle.codexChoices[0]
         showCodex = defaults.bool(forKey: Keys.showCodex)
         animatePet = defaults.bool(forKey: Keys.animatePet)
+        autoFollowActive = defaults.bool(forKey: Keys.autoFollowActive)
         notificationsEnabled = defaults.bool(forKey: Keys.notificationsEnabled)
         thresholds = (defaults.array(forKey: Keys.thresholds) as? [Int]) ?? [75, 90, 100]
         notifyRunningOut = defaults.bool(forKey: Keys.notifyRunningOut)
@@ -287,6 +293,7 @@ final class AppSettings: ObservableObject {
         static let codexPetStyle = "codexPetStyle"
         static let showCodex = "showCodex"
         static let animatePet = "animatePet"
+        static let autoFollowActive = "autoFollowActive"
         static let notificationsEnabled = "notificationsEnabled"
         static let thresholds = "thresholds"
         static let notifyRunningOut = "notifyRunningOut"
