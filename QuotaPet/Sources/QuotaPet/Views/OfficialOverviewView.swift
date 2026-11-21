@@ -216,7 +216,6 @@ struct OfficialOverviewView: View {
                     Text(entry.tabName)
                         .font(.system(size: 15, weight: .semibold))
                         .lineLimit(1)
-                    // 颜色靠小圆点表达，文字用深灰：浅色背景上彩色小字（尤其绿、青）看不清
                     StatusBadge(text: badge(known: known != nil, mood: mood), tint: tint)
                     Spacer(minLength: 0)
                     HStack(spacing: 0) {
@@ -633,9 +632,9 @@ struct AgyWindowRow: View {
                         .font(.system(size: 9.5, weight: .semibold))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        // 只是个说明：中性的灰，不和进度条抢颜色
-                        .background(Capsule().fill(Color.primary.opacity(0.08)))
-                        .foregroundStyle(.secondary)
+                        // 和进度条同色的淡底，字用同色系深一档，看得清又有颜色
+                        .background(Capsule().fill(Level.bar(used ?? 0).opacity(0.14)))
+                        .foregroundStyle(Level.readable(Level.bar(used ?? 0)))
                         .fixedSize()
                         .help(tr("菜单栏和切换条上的 agy 数字取的就是这个窗口（Gemini 组里用得最多的）",
                                  "The agy number in the menu bar and tab bar comes from this window (the most-used one in the Gemini group)"))
@@ -799,21 +798,18 @@ struct PanelHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value += nextValue() }
 }
 
-/// 小状态标签：彩色圆点 + 中性灰底 + 深灰字，深浅色下都看得清
+/// 小状态标签：主题色淡底 + 同色系深一档的字（浅色压暗、深色提亮），有颜色特点也看得清
 struct StatusBadge: View {
     var text: String
     var tint: Color
 
     var body: some View {
-        HStack(spacing: 4) {
-            Circle().fill(tint).frame(width: 6, height: 6)
-            Text(text)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.75))
-        }
-        .fixedSize()
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(Capsule().fill(Color.primary.opacity(0.08)))
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Level.readable(tint))
+            .fixedSize()
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(tint.opacity(0.15)))
     }
 }

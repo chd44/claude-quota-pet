@@ -140,8 +140,20 @@ enum Level {
     static let calmGreen = Color(nsColor: NSColor(name: "QuotaPetCalmGreen") { appearance in
         appearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight]).map { [.darkAqua, .vibrantDark].contains($0) } == true
             ? .systemGreen
-            : NSColor(srgbRed: 0.18, green: 0.58, blue: 0.33, alpha: 1)
+            : NSColor(srgbRed: 0.20, green: 0.64, blue: 0.36, alpha: 1)
     })
+
+    /// 标签文字用的同色系颜色：浅色下压暗一档、深色下提亮一档，配淡色底也看得清
+    static func readable(_ color: Color) -> Color {
+        let base = NSColor(color)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            var resolved = base
+            appearance.performAsCurrentDrawingAppearance { resolved = base.usingColorSpace(.sRGB) ?? base }
+            let dark = appearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight]).map { [.darkAqua, .vibrantDark].contains($0) } == true
+            return dark ? (resolved.blended(withFraction: 0.25, of: .white) ?? resolved)
+                        : (resolved.blended(withFraction: 0.38, of: .black) ?? resolved)
+        })
+    }
 
     static func bar(_ percent: Double) -> Color {
         switch percent {
