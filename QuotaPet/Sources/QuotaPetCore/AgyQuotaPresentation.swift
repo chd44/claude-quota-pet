@@ -123,3 +123,22 @@ public enum MenuBarPercent {
         return Fmt.percent(min(max(used, 0), 100))
     }
 }
+
+extension AgyQuotaPresentation.WindowState {
+    /// 窗口长度：官方面板写明的每周 / 五小时
+    public var duration: TimeInterval? {
+        switch window {
+        case "每周": return 7 * 86400
+        case "五小时": return 5 * 3600
+        default: return nil
+        }
+    }
+
+    /// 平均节奏：只用官方给的重置时间和固定的窗口长度推出这一周的起点，不估算用量。
+    /// 和旧版一样只对一天以上的窗口（每周）有；没有重置时间、已经过了重置点时没有
+    public func pace(now: Date) -> UsageWindow.Pace? {
+        guard let used = usedPercent, let reset = resetsAt, let duration else { return nil }
+        return UsageWindow(id: id, title: title, duration: duration, percent: used, official: used,
+                           startedAt: reset.addingTimeInterval(-duration), resetsAt: reset, scheduleKnown: true).pace(now: now)
+    }
+}

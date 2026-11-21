@@ -663,11 +663,16 @@ struct AgyWindowRow: View {
                         .foregroundStyle(.tertiary)
                 }
             }
-            UsageBar(percent: used ?? 0, official: used ?? 0, tint: Level.bar(used ?? 0), pace: nil)
+            // 每周窗口画平均节奏刻度（和 Claude 卡片一样）；多用 10 个点以上时多一行提醒
+            let pace = window.pace(now: now)
+            UsageBar(percent: used ?? 0, official: used ?? 0, tint: Level.bar(used ?? 0), pace: pace?.expected)
             Text(detail)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if let pace, pace.ahead >= 10 {
+                PaceLine(pace: pace)
+            }
         }
         .accessibilityElement(children: .combine)
     }
