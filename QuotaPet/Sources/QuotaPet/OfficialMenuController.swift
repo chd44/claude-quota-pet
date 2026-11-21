@@ -460,7 +460,8 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
             limited = snapshot?.windows.contains { $0.percent >= 100 } ?? false
         }
         // 宽度按这个显示模式下最长的文字固定：头像钉在最左边、数字左对齐，切换时不左右挪，面板的角标也不动
-        let color: NSColor? = codexStale ? .secondaryLabelColor  // 旧读数：数字变灰
+        // 旧读数在菜单栏照常显示（灰色在菜单栏上看不清），只在面板里变灰标明时间
+        let color: NSColor? = codexStale ? nil
             : (text != nil && !limited && level >= 75) ? (level >= 90 ? .systemRed : .systemOrange) : nil
         let width = MenuBarLayout.width(mode: settings.menuBarText)
         if item.length != width { item.length = width }
