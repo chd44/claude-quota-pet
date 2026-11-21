@@ -148,6 +148,19 @@ func checkAgyPrimaryAndStates() {
           "还没补的状态图退回这款的基础图")
     check(OfficialPetChoice.resolved("agy/panel-tired.png") { _ in true } == "agy/panel-tired.png", "已有的图直接用")
     check(OfficialPetChoice.optionalAntigravityStates.count == 7, "七个可补充的状态")
+    // 平均节奏：每周窗口按官方重置时间推出起点；5 小时窗口、没有重置时间时不画
+    let paced = AgyQuotaReading(status: .available, remainingPercent: 52, groupName: "Gemini · 每周", checkedAt: now,
+                                groupTitle: "Gemini", windowTitle: "每周", windows: [
+        .init(group: "Gemini", window: "每周", remainingPercent: 52, resetsAt: now.addingTimeInterval(3.5 * 86400)),
+        .init(group: "Gemini", window: "五小时", remainingPercent: 90, resetsAt: now.addingTimeInterval(3600)),
+        .init(group: "Claude / GPT", window: "每周", remainingPercent: 95),
+    ])
+    let pacedWindows = AgyQuotaPresentation(reading: paced, now: now).windows
+    if let pace = pacedWindows.first(where: { $0.id == "Gemini · 每周" })?.pace(now: now) {
+        check(abs(pace.expected - 50) < 0.01 && abs(pace.ahead + 2) < 0.01, "agy 每周窗口过了一半时，平均节奏刻度在 50%")
+    } else { check(false, "agy 每周窗口有平均节奏") }
+    check(pacedWindows.first { $0.id == "Gemini · 五小时" }?.pace(now: now) == nil, "agy 5 小时窗口不画平均节奏")
+    check(pacedWindows.first { $0.id == "Claude / GPT · 每周" }?.pace(now: now) == nil, "官方没给重置时间的窗口不画平均节奏")
     check(OfficialPetChoice.brokenArtDigests.count == 12 && OfficialPetChoice.brokenArtDigests.allSatisfy { $0.count == 64 },
           "0.4.3 的 12 张坏图按指纹登记，当作缺图")
 
