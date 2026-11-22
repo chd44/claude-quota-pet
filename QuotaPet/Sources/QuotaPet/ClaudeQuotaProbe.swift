@@ -54,7 +54,9 @@ struct ClaudeQuotaProbe: Sendable {
             return .init(status: .unknown, message: tr("无法创建专用空查询目录", "Couldn’t create the dedicated check folder"))
         }
         let started = Date()
-        defer { removeSessions(for: directory, since: started) }
+        // 这次查询自己的会话 ID：清理时只删它，不碰同一文件夹里别的会话
+        let sessionID = UUID()
+        defer { ClaudeSessionCleanup.remove(sessionID: sessionID, workingDirectory: directory, home: fm.homeDirectoryForCurrentUser) }
 
         var master: Int32 = -1, slave: Int32 = -1
         var size = winsize(ws_row: rows, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0)
@@ -66,7 +68,8 @@ struct ClaudeQuotaProbe: Sendable {
         _ = fcntl(master, F_SETFL, O_NONBLOCK)
         let process = Process()
         process.executableURL = binary
-        process.arguments = ["--safe-mode", "--strict-mcp-config", "--tools", ""]
+        process.arguments = ["--safe-mode", "--strict-mcp-config", "--tools", "",
+                             "--session-id", ClaudeSessionCleanup.idString(sessionID)]
         process.currentDirectoryURL = directory
         process.standardInput = terminal; process.standardOutput = terminal; process.standardError = terminal
         // 只给普通的系统环境变量；不碰 CLI 的登录存储
@@ -102,7 +105,21 @@ struct ClaudeQuotaProbe: Sendable {
         while Date().timeIntervalSince(started) < 45 {
             if Task.isCancelled { return .init(status: .unknown, message: tr("查询已取消", "Query cancelled")) }
             var chunk = [UInt8](repeating: 0, count: 32768)
+            let exited = !process.isRunning  // 先看是否已退出、再读：退出前写出的内容这一次一定读得到
             let count = Darwin.read(master, &chunk, chunk.count)
+            if exited, count <= 0 {
+                // CLI 自己退出了（比如旧版本不认 --session-id）：不用等到超时。先认一次最后的画面：
+                // 最后出现的是登录提示就是要登录（屏幕上残留的旧额度文字不算数）
+                if ClaudeCLIScreen.finalScreen(screen) == .login {
+                    return .init(status: .signInRequired, checkedAt: Date(),
+                                 message: tr("请先在终端运行 claude 并登录", "Run claude in Terminal and sign in first"))
+                }
+                if ClaudeCLIScreen.rejectsSessionID(screen) {
+                    return .init(status: .unknown, message: tr("官方 Claude Code CLI 版本过旧，不支持 --session-id，请更新后再查",
+                                                               "The official Claude Code CLI is too old for --session-id; update it and try again"))
+                }
+                return .init(status: .unknown, message: tr("官方 CLI 提前退出了", "The official CLI exited early"))
+            }
             if count > 0 {
                 screen.feed(Array(chunk.prefix(count)))
                 received += count
@@ -116,7 +133,8 @@ struct ClaudeQuotaProbe: Sendable {
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 continue
             }
-            switch ClaudeCLIScreen.classify(screen) {
+            // 屏幕上还残留着额度文字、最后却是登录提示：按登录处理，不拿残留的数字当读数
+            switch ClaudeCLIScreen.finalScreen(screen) {
             case .login:
                 return .init(status: .signInRequired, checkedAt: Date(),
                              message: tr("请先在终端运行 claude 并登录", "Run claude in Terminal and sign in first"))
@@ -174,18 +192,4 @@ struct ClaudeQuotaProbe: Sendable {
         _ = text.withCString { Darwin.write(master, $0, strlen($0)) }
     }
 
-    /// CLI 每次启动都会在 ~/.claude/projects 下为这个目录记一个会话：只删这个专用目录的、这次运行之后写的会话文件
-    private static func removeSessions(for directory: URL, since start: Date) {
-        let fm = FileManager.default
-        let name = ClaudeCLILocator.sessionFolderName(for: directory)
-        guard name.hasSuffix("-QuotaPet-ClaudeQuotaCheck") else { return }
-        let folder = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects/\(name)", isDirectory: true)
-        guard folder.resolvingSymlinksInPath().path == folder.path,
-              let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
-        for file in files where file.pathExtension == "jsonl" {
-            let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-            if modified >= start.addingTimeInterval(-5) { try? fm.removeItem(at: file) }
-        }
-        if (try? fm.contentsOfDirectory(atPath: folder.path))?.isEmpty == true { try? fm.removeItem(at: folder) }
-    }
 }

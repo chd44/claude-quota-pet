@@ -207,6 +207,9 @@ public struct ActivityScan: RandomAccessCollection, Sendable {
 public final class ActivityLedger: @unchecked Sendable {
     /// 修改时间比现在晚多少以内还算正常：只留文件系统时间精度的余量。再晚的当成时钟偏差，不算
     public static let futureTolerance: TimeInterval = 0.01
+    /// 核对「最近一次主动开始」往回看多久。和「现在是否在用」（window）分开：QuotaPet 没运行时提交的提示词
+    /// 可能早于 window，这家却一直在用，开始时间仍要恢复（只在同一次核对里这家确实在用时才算）
+    public static let startLookback: TimeInterval = 24 * 3600
 
     public let source: ActivitySource
     public let window: TimeInterval
@@ -226,6 +229,9 @@ public final class ActivityLedger: @unchecked Sendable {
     private let epochLock = NSLock()
     /// 第一次核对（开始监听）的时间：在这之后才出生的文件不进基线，留给实时事件或补扫报一次「新建」
     private var watchingSince: Date?
+    /// 最近一次 applyFinding / observeFinding 里，有没有会话文件（不算 history.jsonl 这类开始记录文件）的真实写入。
+    /// QuotaPet 自己查额度时 CLI 只会动开始记录文件：它不能当成「这家确实在用」的证据（只在账本所在的线程上读）
+    public private(set) var lastFindingHadSessionWrite = false
 
     public init(source: ActivitySource, window: TimeInterval,
                 stamp: ((String) -> FileStamp?)? = nil, list: ((URL) -> [String])? = nil) {
@@ -236,6 +242,12 @@ public final class ActivityLedger: @unchecked Sendable {
     }
 
     private func stamp(_ path: String) -> FileStamp? { customStamp.map { $0(path) } ?? FileStamp.of(path: path) }
+
+    /// 开始记录文件（history.jsonl）此刻的内容修改时间：启动时、QuotaPet 第一次自己查额度之前取一次，
+    /// 那次查询改写它之前，离线期间用户最后一次提交提示词的时间还在。只读元数据，不动账本
+    public func startFileTimes() -> [Date] {
+        source.scanFiles.filter { source.isStartFile($0.path) }.compactMap { stamp($0.path)?.modified }
+    }
 
     private var currentEpoch: UInt64 {
         epochLock.lock(); defer { epochLock.unlock() }
@@ -288,7 +300,10 @@ public final class ActivityLedger: @unchecked Sendable {
             let list = customList ?? { FileStamp.files(in: $0, limit: .max) }
             found = folders.flatMap(list).compactMap { path in stamp(path).map { (path, $0) } }
         }
-        found += files.compactMap { file in stamp(file.path).flatMap { $0.modified >= since ? (file.path, $0) : nil } }
+        let startSince = now.addingTimeInterval(-Self.startLookback)
+        found += files.compactMap { file in
+            stamp(file.path).flatMap { $0.modified >= (source.isStartFile(file.path) ? startSince : since) ? (file.path, $0) : nil }
+        }
         return scan(found, epoch: epoch)
     }
 
@@ -332,11 +347,26 @@ public final class ActivityLedger: @unchecked Sendable {
     public func apply(_ scan: ActivityScan, now: Date) -> Date? { applyFinding(scan, now: now)?.time }
 
     public func applyFinding(_ scan: ActivityScan, now: Date) -> ActivityFinding? {
-        ActivityFinding.merge(scan.entries.map { entry in
+        // 早于 window 的开始记录（history.jsonl 第一次见到、或内容变了）：不算「现在在用」，
+        // 但这一家在这次核对里确实在用时，它就是这家最近一次主动开始
+        var lateStarts: [Date] = []
+        var sessionWrite = false
+        let found = ActivityFinding.merge(scan.entries.map { entry in
             guard !updatedSince(entry.key, scan.epoch) else { return nil }
-            return check(key: entry.key, path: entry.path, current: entry.stamp, flags: [], now: now,
-                         startFile: entry.startFile, newCandidate: entry.newCandidate)
+            let changed = entry.startFile && (known[entry.key].map { entry.stamp.contentDiffers(from: $0.stamp) } ?? true)
+            let result = check(key: entry.key, path: entry.path, current: entry.stamp, flags: [], now: now,
+                               startFile: entry.startFile, newCandidate: entry.newCandidate)
+            if result == nil, changed, entry.stamp.modified < now.addingTimeInterval(-window),
+               entry.stamp.modified >= now.addingTimeInterval(-Self.startLookback) {
+                lateStarts.append(entry.stamp.modified)
+            }
+            if result != nil, !entry.startFile { sessionWrite = true }
+            return result
         })
+        lastFindingHadSessionWrite = sessionWrite
+        guard var found else { return nil }
+        if let late = lateStarts.max(), found.start.map({ late > $0 }) ?? true { found.start = late }
+        return found
     }
 
     /// 只记基线：没见过的文件记下来，不算活动；已经见过、或核对开始后被实时更新过的不动
@@ -368,11 +398,17 @@ public final class ActivityLedger: @unchecked Sendable {
     /// 核对这几个文件事件（带着事件标志）：最近一次真实写入，以及其中的「主动开始」
     public func observeFinding(_ files: [FileEvent], now: Date) -> ActivityFinding? {
         let current = files.map { ($0, stamp($0.path)) }
-        return ActivityFinding.merge(current.map { event, stamp in
+        var sessionWrite = false
+        let found = ActivityFinding.merge(current.map { event, stamp in
             guard source.isSessionFile(event.path) else { return nil }
-            return check(key: comparablePath(event.path), path: event.path, current: stamp, flags: event.flags, now: now,
-                         startFile: source.isStartFile(event.path), newCandidate: source.isNewSessionCandidate(event.path), live: true)
+            let startFile = source.isStartFile(event.path)
+            let result = check(key: comparablePath(event.path), path: event.path, current: stamp, flags: event.flags, now: now,
+                               startFile: startFile, newCandidate: source.isNewSessionCandidate(event.path), live: true)
+            if result != nil, !startFile { sessionWrite = true }
+            return result
         })
+        lastFindingHadSessionWrite = sessionWrite
+        return found
     }
 
     /// 一批文件事件里最近一次真实写入的内容时间；没有真实写入时 nil。
@@ -468,6 +504,14 @@ public enum StartVerdict: Equatable, Sendable {
            time >= started.addingTimeInterval(-slack), time <= ended.addingTimeInterval(slack) { return .own }
         return .user
     }
+
+    /// 同上，再对照 QuotaPet 自己更早的几次查询时段（本次运行的、和启动时固定下来的上一次运行的）：落在其中任何一段里都是自己的
+    public static func judge(_ time: Date, querying: Bool, started: Date?, ended: Date?,
+                             earlier: [(started: Date, ended: Date)]) -> StartVerdict {
+        let verdict = judge(time, querying: querying, started: started, ended: ended)
+        guard verdict == .user else { return verdict }
+        return earlier.contains { judge(time, querying: false, started: $0.started, ended: $0.ended) == .own } ? .own : .user
+    }
 }
 
 /// agy 每个会话的步骤记录 brain/<会话>/.system_generated/logs/transcript.jsonl：一步一行，开头标着来源和类型，
@@ -507,24 +551,42 @@ public final class AgyTranscriptReader: @unchecked Sendable {
     public static let tailCheck = 256 << 10
     private var cursors: [String: LineCursor] = [:]
     private let lock = NSLock()
+    /// 「在未来」只按实际读到这一行时的时钟判断，不按调用方早先取的 now：后台核对排队以后用户才发的消息，
+    /// 读到时已经不在未来，不能因为排队时的时间较早就被当成未来记录跳过（游标会越过它，之后再也读不到）；
+    /// 读的过程中时钟往回拨了，也按回拨后的时钟判断，同一批里按新时钟合法的那条保得住
+    let clock: () -> Date
 
-    public init() {}
+    public init(clock: @escaping () -> Date = { Date() }) {
+        self.clock = clock
+    }
 
-    /// 这个文件里新出现的用户消息里最近的一条（window 以内、不在未来）；没有就 nil
-    public func read(_ path: String, now: Date, window: TimeInterval) -> Date? {
+    /// 这个文件里新出现的用户消息里最近的一条（window 以内、不在未来）；没有就 nil。
+    /// firstReadLookback：第一次见到这个文件、读末尾一段时往回看多久（默认同 window）
+    public func read(_ path: String, now: Date, window: TimeInterval, firstReadLookback: TimeInterval? = nil) -> Date? {
         lock.lock(); defer { lock.unlock() }
-        let url = URL(fileURLWithPath: path)
-        guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber else {
-            cursors[path] = nil
+        // 同一个文件可能以不同写法到达（实时通知、列目录得到的 /private/var 与 /var、经过符号链接，
+        // 包括文件本身就是链接）：先解析一次，游标的键、取大小、打开文件都用解析后的同一个路径
+        let key = Self.canonical(path)
+        let url = URL(fileURLWithPath: key)
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: key))?[.size] as? NSNumber else {
+            cursors[key] = nil
             return nil
         }
-        var latest: Date?
+        var candidates: [Date] = []
+        // 每读一行取一次时钟：读到的每一行都早于这一刻（除非真的写着未来的时间）
+        var limit: Date { clock().addingTimeInterval(ActivityLedger.futureTolerance) }
+        let earliest = now.addingTimeInterval(-(cursors[key] == nil ? max(window, firstReadLookback ?? window) : window))
         func take(_ line: Data) {
-            guard let time = AgyTranscript.userInputTime(line: line), time >= now.addingTimeInterval(-window),
-                  time <= now.addingTimeInterval(ActivityLedger.futureTolerance) else { return }
-            if latest.map({ time > $0 }) ?? true { latest = time }
+            guard let time = AgyTranscript.userInputTime(line: line), time >= earliest, time <= limit else { return }
+            candidates.append(time)
         }
-        if cursors[path] == nil {
+        // 读完整批再按最后的时钟复核一遍：读的过程中时钟往回拨了，先读到、当时合法的那条现在已在未来，
+        // 不能让它顶掉同一批里按新时钟合法的那条（游标已经越过这一批，之后不会再读）
+        var latest: Date? {
+            let final = limit
+            return candidates.filter { $0 <= final }.max()
+        }
+        if cursors[key] == nil {
             // 第一次见到：只看末尾一段，从第一个完整行开始；游标停在最后一个完整行之后，
             // 还没写完的那一行留给下次读（不然写完时只读到后半截，这条用户消息就漏了）
             let total = size.uint64Value
@@ -542,13 +604,30 @@ public final class AgyTranscriptReader: @unchecked Sendable {
                     resume = start + UInt64(data.distance(from: data.startIndex, to: lineStart))
                 }
             }
-            cursors[path] = LineCursor(offset: resume, identityOf: url)
+            cursors[key] = LineCursor(offset: resume, identityOf: url)
             return latest
         }
-        var cursor = cursors[path]!
+        var cursor = cursors[key]!
         cursor.readAppended(from: url, size: size.uint64Value) { take($0) }
-        cursors[path] = cursor
+        cursors[key] = cursor
         return latest
+    }
+
+    static func canonical(_ path: String) -> String {
+        guard let resolved = realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    /// 整体核对时要读哪些步骤记录：平时是 window 以内改过的。还没按「主动开始」的回看窗口找过（lookbackPending）、
+    /// 这次核对又有会话写入的证据（会话文件 window 以内改过）时，24 小时以内改过的都读：用户消息可能早于 window，
+    /// 之后那个会话只有会话文件在写、步骤记录没再动过。返回要读的路径和这次是不是按回看窗口找的
+    public static func transcriptsToRead(roots: [URL], scan: ActivityScan, now: Date, window: TimeInterval,
+                                         lookbackPending: Bool) -> (paths: [String], lookback: Bool) {
+        guard !roots.isEmpty else { return ([], false) }
+        let lookback = lookbackPending && scan.entries.contains { $0.stamp.modified >= now.addingTimeInterval(-window) }
+        let since = now.addingTimeInterval(-(lookback ? ActivityLedger.startLookback : window))
+        return (recentTranscripts(roots: roots, since: since), lookback)
     }
 
     /// 这些 agy 根目录下 window 以内改过的步骤记录（整体核对、晚接上监听时用）

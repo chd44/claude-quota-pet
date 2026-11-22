@@ -273,6 +273,46 @@ final class AppSettings: ObservableObject {
             } catch { desktopAutoLaunchError = error.localizedDescription }
         }
     }
+    /// 自动跟随：每家最近一次「主动开始」的时间（只存时间，不存内容）。重启后恢复，长任务跨重启仍保持跟随优先。
+    /// 比 now 还晚的（系统时间往回拨之前存的）不恢复，并且从设置里永久删掉：时间追上以后、下次启动都不能再冒出来
+    func followStarts(now: Date) -> [OfficialQuotaEntry: Date] {
+        let stored = defaults.dictionary(forKey: Keys.followStarts) as? [String: Double] ?? [:]
+        let limit = now.addingTimeInterval(ActivityLedger.futureTolerance)
+        var result: [OfficialQuotaEntry: Date] = [:]
+        for entry in OfficialQuotaEntry.allCases {
+            if let seconds = stored[String(describing: entry)], seconds.isFinite {
+                let date = Date(timeIntervalSince1970: seconds)
+                if date <= limit { result[entry] = date }
+            }
+        }
+        if result.count != stored.count { saveFollowStarts(result) }
+        return result
+    }
+
+    /// QuotaPet 自己最近一次用 Claude Code CLI 查额度的起止时间（只存两个时间）。重启后补扫到的 history.jsonl
+    /// 如果是那次查询留下的，不能算成用户的主动开始（本次运行的查询时段只在内存里）
+    func ownClaudeQuery() -> (started: Date, ended: Date)? {
+        guard let pair = defaults.array(forKey: Keys.ownClaudeQuery) as? [Double], pair.count == 2,
+              pair.allSatisfy(\.isFinite), pair[1] >= pair[0] else { return nil }
+        return (Date(timeIntervalSince1970: pair[0]), Date(timeIntervalSince1970: pair[1]))
+    }
+
+    func saveOwnClaudeQuery(started: Date, ended: Date) {
+        defaults.set([started.timeIntervalSince1970, ended.timeIntervalSince1970], forKey: Keys.ownClaudeQuery)
+    }
+
+    /// Codex 日志里已经判定无效的未来记录（只存会话文件名的指纹和记录时间，见 CodexRejectedRecords）：重启后冷扫描也不读回来
+    func codexRejectedRecords() -> CodexRejectedRecords {
+        let defaults = defaults
+        let stored = defaults.dictionary(forKey: Keys.codexRejected) as? [String: Double] ?? [:]
+        return CodexRejectedRecords(stored: stored, save: { defaults.set($0, forKey: Keys.codexRejected) })
+    }
+
+    func saveFollowStarts(_ starts: [OfficialQuotaEntry: Date]) {
+        defaults.set(Dictionary(uniqueKeysWithValues: starts.map { (String(describing: $0.key), $0.value.timeIntervalSince1970) }),
+                     forKey: Keys.followStarts)
+    }
+
     func pauseDesktopAutoLaunch() {
         defaults.set(true, forKey: "desktopAutoLaunchPaused")
         defaults.synchronize()
@@ -294,6 +334,9 @@ final class AppSettings: ObservableObject {
         static let showCodex = "showCodex"
         static let animatePet = "animatePet"
         static let autoFollowActive = "autoFollowActive"
+        static let followStarts = "followStarts"
+        static let ownClaudeQuery = "lastOwnClaudeQuery"
+        static let codexRejected = "codexRejectedRecords"
         static let notificationsEnabled = "notificationsEnabled"
         static let thresholds = "thresholds"
         static let notifyRunningOut = "notifyRunningOut"

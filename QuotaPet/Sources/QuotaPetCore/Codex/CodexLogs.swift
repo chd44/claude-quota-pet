@@ -136,11 +136,30 @@ public final class CodexLogScanner {
     private var cursors: [String: LineCursor] = [:]
     /// 最近用过 Codex 的时间（token_count 事件自己的时间，不是读到它的时间）：重扫、归档挪动都不会续期。
     /// 记一个集合而不是最大值：时钟偏差写出的未来时间不能把真正最近的那次盖住
-    private var activity: Set<Date> = []
+    /// 值是写下它的会话文件（判成未来记录时按文件逐条记进 rejected）
+    private var activity: [Date: Set<String>] = [:]
     /// 「新一轮开始」的记录时间（用户主动发起的），和有没有见过这种记录（旧版 Codex 日志没有时，退回用用量记录当开始）
-    private var starts: Set<Date> = []
+    private var starts: [Date: Set<String>] = [:]
+    /// 已经判定无效的未来记录（见 CodexRejectedRecords）：重扫、冷启动都不再读回来。App 里存在本机设置
+    public let rejected: CodexRejectedRecords
+    /// 读到某一行时判断「在未来」用的时钟：和 refresh 的 now 取较晚的那个（refresh 开始以后才写进来的行不算未来）
+    private let clock: () -> Date
+    private var readNow = Date.distantPast
     /// 每个会话文件的状态：是不是子代理会话、有没有出现过开始记录、有没有出现过用量记录
-    private struct FileState { var subagent = false; var sawStart = false; var sawUsage = false }
+    /// recentStarts：这个会话最近几次真实的开始（不按年龄清掉，文件还在就留着）——长任务跑了两个多小时、QuotaPet 重启后，
+    /// 冷启动照样能从日志恢复「它是用户最近主动开始的那家」。只有读到时不在未来的才占名额（先验时间再留）；
+    /// 留几次而不是只留最新一次：之后系统时间往回拨、较新的几次变成未来被丢掉，较早的那次还在
+    private struct FileState {
+        var subagent = false; var sawStart = false; var sawUsage = false
+        var recentStarts: [Date] = []
+        static let keptStarts = 4
+        mutating func noteStart(_ time: Date) {
+            guard !recentStarts.contains(time) else { return }
+            recentStarts.append(time)
+            recentStarts.sort()
+            if recentStarts.count > Self.keptStarts { recentStarts.removeFirst(recentStarts.count - Self.keptStarts) }
+        }
+    }
     private var fileStates: [String: FileState] = [:]
     /// 上次看到的每个文件的修改时间：大小没变、修改时间变了（原地改写）时，把末尾一段重新核对一遍
     private var modifiedAt: [String: Date] = [:]
@@ -152,14 +171,19 @@ public final class CodexLogScanner {
     private var readings: [String: CodexRateReading] = [:]
     public private(set) var trackedFiles = 0
 
-    public init(home: URL = CodexLogScanner.defaultHome, retention: TimeInterval = 31 * 86400) {
+    public init(home: URL = CodexLogScanner.defaultHome, retention: TimeInterval = 31 * 86400,
+                rejected: CodexRejectedRecords = CodexRejectedRecords(), clock: @escaping () -> Date = { Date() }) {
         self.home = home
         self.retention = retention
+        self.rejected = rejected
+        self.clock = clock
     }
 
     /// 读取新增内容，返回保留期内的全部读数（按时间排序）
     public func refresh(now: Date = Date()) -> [CodexRateReading] {
         let cutoff = now.addingTimeInterval(-retention)
+        readNow = now
+        dropFuture(now)  // 先丢掉已经在未来的，需要的话这一轮就把相关会话重读
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
         var files: [(url: URL, size: UInt64, modified: Date)] = []
         for directory in directories {
@@ -189,12 +213,15 @@ public final class CodexLogScanner {
                 checkTail(of: file.url, size: file.size, readings: false)
                 continue
             }
-            if let cursor = cursors[path], cursor.offset == file.size, let seen = modifiedAt[path], seen != file.modified {
-                // 大小没变、修改时间变了：原地等长改写，游标看不出来，末尾一段重新核对
+            if let cursor = cursors[path], cursor.offset == file.size, let seen = modifiedAt[path], seen != file.modified,
+               cursor.matches(file.url) {
+                // 大小没变、修改时间变了，文件还是原来那个：原地等长改写，游标看不出来，末尾一段重新核对。
+                // 换成了另一个等长的文件（原子替换）：不能拿旧会话的分类读新文件的末尾，交给下面从头读
                 checkTail(of: file.url, size: file.size, readings: true)
             }
             var cursor = cursors[path] ?? LineCursor()
-            cursor.readAppended(from: file.url, size: file.size) { line in
+            // 文件被换掉（原子替换、重写）：旧会话的状态（是不是子代理、有没有开始记录）不再适用
+            cursor.readAppended(from: file.url, size: file.size, onReset: { self.fileStates[path] = nil }) { line in
                 if let reading = ingest(line: line, file: path), reading.isMain, reading.time <= horizon, base.map({ reading.time > $0 }) ?? true {
                     base = reading.time
                 }
@@ -207,8 +234,8 @@ public final class CodexLogScanner {
         trackedFiles = cursors.count
         readings = readings.filter { $0.value.time >= cutoff }
         let recent = now.addingTimeInterval(-Self.activityRetention)
-        activity = activity.filter { $0 >= recent }
-        starts = starts.filter { $0 >= recent }
+        activity = activity.filter { $0.key >= recent }
+        starts = starts.filter { $0.key >= recent }
         return readings.values.sorted { $0.time < $1.time }
     }
 
@@ -216,19 +243,61 @@ public final class CodexLogScanner {
     /// 时间在未来的记录（时钟偏差、或系统时间往回拨之前写下的）直接丢掉：不能等时间追上后再冒出来
     public func lastActivity(asOf now: Date) -> Date? {
         dropFuture(now)
-        return activity.max()
+        return activity.keys.max()
     }
 
     /// 到 now 为止最近一次「用户主动开始一轮」的时间。日志里从没出现过开始记录（旧版）时，退回用最近一次用量记录
     public func lastStart(asOf now: Date) -> Date? {
         dropFuture(now)
-        return starts.max()
+        let limit = now.addingTimeInterval(ActivityLedger.futureTolerance)
+        // 近两小时的开始记录，加上各个还在的会话最近一次开始（长任务的开始可能早于两小时）
+        return (Array(starts.keys) + fileStates.values.compactMap(\.recentStarts.last).filter { $0 <= limit }).max()
     }
 
+    /// 在未来的记录一律永久丢掉（全局的和每个会话的），并按会话逐条记进 rejected：之后重扫、冷启动都不再读回来。
+    /// 较早的合法记录留着；某个会话留着的开始全被丢掉时，马上从头重读这个会话（被拒的那几条照样跳过），找回被挤出名额的较早开始
     private func dropFuture(_ now: Date) {
         let limit = now.addingTimeInterval(ActivityLedger.futureTolerance)
-        activity = activity.filter { $0 <= limit }
-        starts = starts.filter { $0 <= limit }
+        for (time, files) in activity where time > limit {
+            for file in files { rejected.insert(file: file, time: time, now: now) }
+            activity[time] = nil
+        }
+        for (time, files) in starts where time > limit {
+            for file in files { rejected.insert(file: file, time: time, now: now) }
+            starts[time] = nil
+        }
+        var emptied: [String] = []
+        for (path, state) in fileStates where state.recentStarts.last.map({ $0 > limit }) ?? false {
+            for time in state.recentStarts where time > limit { rejected.insert(file: path, time: time, now: now) }
+            let kept = state.recentStarts.filter { $0 <= limit }
+            fileStates[path]?.recentStarts = kept
+            if kept.isEmpty, !path.isEmpty, cursors[path] != nil { emptied.append(path) }
+        }
+        for path in emptied { reread(path, now: now) }
+    }
+
+    /// 从头重读一个会话文件（只在回拨后它留着的开始全被丢掉时；很少发生）
+    private func reread(_ path: String, now: Date) {
+        let url = URL(fileURLWithPath: path)
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber else { return }
+        let saved = readNow
+        readNow = now
+        defer { readNow = saved }
+        fileStates[path] = nil
+        var cursor = LineCursor()
+        cursor.readAppended(from: url, size: size.uint64Value, onReset: { self.fileStates[path] = nil }) { ingest(line: $0, file: path) }
+        cursors[path] = cursor
+    }
+
+    /// 这条记录能不能算：已经判定无效的不算；读到时就在未来的（按 refresh 的 now 和此刻的时钟里较晚的那个）记进 rejected、不算
+    private func accepts(_ time: Date, file: String) -> Bool {
+        if rejected.contains(file: file, time: time) { return false }
+        let tolerance = ActivityLedger.futureTolerance
+        if time > readNow.addingTimeInterval(tolerance), time > clock().addingTimeInterval(tolerance) {
+            rejected.insert(file: file, time: time, now: max(readNow, clock()))
+            return false
+        }
+        return true
     }
 
     /// 重新核对文件末尾一段（最多 tailCheck 字节，从第一个完整行开始），重复的记录自然去重。
@@ -261,14 +330,22 @@ public final class CodexLogScanner {
         }
         if let start = CodexRateReading.turnStart(line: line) {
             state.sawStart = true
-            activity.insert(start)
-            if !state.subagent { starts.insert(start) }  // 子代理会话的开始是后台派生的：只算动静
+            guard accepts(start, file: file) else { return nil }
+            activity[start, default: []].insert(file)
+            if !state.subagent {  // 子代理会话的开始是后台派生的：只算动静
+                starts[start, default: []].insert(file)
+                state.noteStart(start)
+            }
             return nil
         }
         guard let event = CodexRateReading.tokenEvent(line: line) else { return nil }
-        activity.insert(event.time)
+        let valid = accepts(event.time, file: file)
+        if valid { activity[event.time, default: []].insert(file) }
         // 旧格式（这个会话里从没出现过开始记录）：只有这个会话的第一条用量记录算开始，之后的是同一轮或后台接着写
-        if !state.subagent, !state.sawStart, !state.sawUsage { starts.insert(event.time) }
+        if valid, !state.subagent, !state.sawStart, !state.sawUsage {
+            starts[event.time, default: []].insert(file)
+            state.noteStart(event.time)
+        }
         state.sawUsage = true
         guard keepReadings, let reading = event.reading else { return nil }
         readings["\(reading.time.timeIntervalSince1970)|\(reading.limitID ?? "")"] = reading

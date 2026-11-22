@@ -105,6 +105,11 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
     private var lastActive: [OfficialQuotaEntry: Date] = [:]
     /// 每家最近一次「主动开始」的时间（Codex 新一轮开始、Claude 提交提示词、新建会话）：接着写的后台活动抢不走它
     private var lastStart: [OfficialQuotaEntry: Date] = [:]
+    /// QuotaPet 自己查 Claude 额度的时段（判 history.jsonl 的写入是不是自己的）：启动时固定下来的上一次运行的那次单独留着，
+    /// 不进本次运行的滚动列表（挂着的离线候选可能很晚才放出，那时仍要对照得到它）；本次运行最近 8 次另记。
+    /// 固定下来而不是每次判断时再读设置：本次第一次查询结束会覆盖设置里的那一条
+    private var previousRunClaudeQuery: (started: Date, ended: Date)?
+    private var ownClaudeQueries: [(started: Date, ended: Date)] = []
     /// 手动选择的时刻（单调时钟：开机以来的秒数，改系统时间不影响十分钟保护）
     private var manualAt: TimeInterval?
     private var autoSwitching = false
@@ -120,7 +125,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
                                                 probe: { await ClaudeQuotaProbe().read() },
                                                 nextChange: { reading, now in reading?.nextChange(after: now) })
         self.usageStore = settings.allowsSystemActions
-            ? UsageStore(providers: [CodexProvider()], settings: settings) : nil
+            ? UsageStore(providers: [CodexProvider(rejected: settings.codexRejectedRecords())], settings: settings) : nil
         super.init()
         if let button = item.button {
             button.target = self
@@ -131,10 +136,8 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         menu.delegate = self
         configurePopover()
         agyMonitor.onChange = { [weak self] in self?.updateReading() }
-        claudeMonitor.onChange = { [weak self] in
-            self?.claudeActivity.recheckPendingStarts()  // 查询结束了：挂起的提示词写入现在能判是不是自己的
-            self?.updateUsage()
-        }
+        claudeMonitor.onChange = { [weak self] in self?.claudeQueryChanged() }
+        captureLaunchState()
         // 三家一直保持读数：切换页签只换显示，不清空、不重读（打开面板就能看到三家已有的数据）
         agyMonitor.select(true)
         claudeMonitor.select(true)
@@ -144,6 +147,9 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
             if self?.autoSwitching == false { self?.manualAt = ProcessInfo.processInfo.systemUptime }
             DispatchQueue.main.async { self?.updateImage() }
         }.store(in: &subscriptions)
+        // 重启前每家最近一次「主动开始」：已经跑了很久的长任务重启后仍是「用户最近主动开始的那家」，别家的后台写入抢不走。
+        // 只恢复开始时间，不恢复「在用」：还在不在用照样看现在的动静
+        lastStart = settings.followStarts(now: Date())
         settings.$menuBarText.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateImage() }
             .store(in: &subscriptions)
         // 重新打开自动跟随：马上按现在谁在用判断一次，不等下一次动静（@Published 赋值前就通知，等新值落定）
@@ -171,9 +177,11 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
             // QuotaPet 自己用 Claude Code CLI 读 /usage 时，CLI 也可能往 history.jsonl 记一笔：
             // 只把写入时间落在这次查询进程运行期间的算自己的；查询还没结束时先挂起，结束后再判，不丢用户真实的提示词
             claudeActivity.startVerdict = { [weak self] time in
-                guard let monitor = self?.claudeMonitor else { return .user }
-                return StartVerdict.judge(time, querying: monitor.querying,
-                                          started: monitor.lastQueryStarted, ended: monitor.lastQueryEnded)
+                guard let self else { return .user }
+                // 当前这次查询，再对照更早的几次（含启动时固定下来的上一次运行的那次：重启后补扫会看到它留下的写入）
+                return StartVerdict.judge(time, querying: self.claudeMonitor.querying, started: self.claudeMonitor.lastQueryStarted,
+                                          ended: self.claudeMonitor.lastQueryEnded,
+                                          earlier: (self.previousRunClaudeQuery.map { [$0] } ?? []) + self.ownClaudeQueries)
             }
             agyActivity.onActivity = { [weak self] time in self?.noteActive(.antigravity, at: time) }
             agyActivity.refresh = { [weak self] in self?.agyMonitor.refreshForActivity() }
@@ -586,6 +594,28 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         agyActivity.start()
     }
 
+    /// 第一次查 Claude 额度之前调用：固定上一次运行时自己查询的时段，记下 history.jsonl 此刻的修改时间
+    /// （这次查询的 CLI 可能改写它；补扫晚回来时也仍能认出上一次查询留下的写入、找回离线期间的提示词）
+    private func captureLaunchState() {
+        previousRunClaudeQuery = settings.ownClaudeQuery()
+        if settings.allowsSystemActions { claudeActivity.captureOfflineStarts() }
+    }
+
+    /// Claude 的读数或查询状态变了。查询结束时记下这次查询的起止时间（存进设置：重启后也认得出它留下的 history.jsonl 写入；
+    /// 也记进本次运行的列表：晚回来的补扫结果对照得到更早的几次）
+    private func claudeQueryChanged() {
+        if !claudeMonitor.querying, let started = claudeMonitor.lastQueryStarted,
+           let ended = claudeMonitor.lastQueryEnded, ended >= started {
+            settings.saveOwnClaudeQuery(started: started, ended: ended)
+            if !ownClaudeQueries.contains(where: { $0.started == started && $0.ended == ended }) {
+                ownClaudeQueries.append((started, ended))
+                if ownClaudeQueries.count > 8 { ownClaudeQueries.removeFirst(ownClaudeQueries.count - 8) }
+            }
+        }
+        claudeActivity.recheckPendingStarts()  // 查询结束了：挂起的提示词写入现在能判是不是自己的
+        updateUsage()
+    }
+
     /// 某家有了动静：记下时间，更新「正在用」，必要时自动切过去
     private func noteActive(_ entry: OfficialQuotaEntry, at time: Date) {
         if recordActive(entry, at: time) { followActive() }
@@ -605,6 +635,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         if let previous = lastStart[entry], previous >= time, previous <= now { return false }
         lastStart[entry] = time
         if lastActive[entry].map({ $0 < time }) ?? true { lastActive[entry] = time }
+        settings.saveFollowStarts(lastStart)  // 重启后恢复
         return true
     }
 
@@ -626,7 +657,11 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         // 记下的时间比现在还晚：系统时间往回拨过，这些是回拨之前的旧记录。丢掉，不能等时间追上后又压过回拨后真正的使用
         let limit = now.addingTimeInterval(ActivityLedger.futureTolerance)
         lastActive = lastActive.filter { $0.value <= limit }
-        lastStart = lastStart.filter { $0.value <= limit }
+        let kept = lastStart.filter { $0.value <= limit }
+        if kept.count != lastStart.count {
+            lastStart = kept
+            settings.saveFollowStarts(kept)
+        }
         let active = Set(ActiveService.active(lastActive, now: now))
         if state.activeEntries != active { state.activeEntries = active }
         let paused = popover.isShown || floatingPanel?.isVisible == true || menuTracking
@@ -812,8 +847,10 @@ enum MenuBarLayout {
 final class ActivityWatch {
     private let ledger: ActivityLedger
     /// agy：增量读会话的步骤记录，认出用户自己发的消息（续聊原会话也认得出）
-    private let transcripts = AgyTranscriptReader()
+    private let transcripts: AgyTranscriptReader
     private var pendingTranscripts = false
+    /// 测试用、初始化时给定不再改：后台核对列完目录、开始读步骤记录之前在后台线程上调用（App 里为 nil）
+    private let beforeTranscriptRead: (@Sendable () -> Void)?
     private var watcher: FileWatcher?
     /// 正在监听的路径（真的起来了才记）：存在的根目录，加上会话目录符号链接此刻指向的地方
     private var watchedPaths: [String] = []
@@ -837,6 +874,32 @@ final class ActivityWatch {
     var startVerdict: (Date) -> StartVerdict = { _ in .user }
     /// 查询还没结束时挂起的主动开始，查询结束后再判
     private var pendingStarts: [Date] = []
+    /// 早于 window 的主动开始（QuotaPet 没运行时提交的提示词、发的消息）：不算「现在在用」。
+    /// 这家这次运行里有会话写入时（启动时就在写，或之后才恢复写入）才算它最近一次主动开始：
+    /// 那时它仍在 24 小时以内、又没有更晚的开始，就和运行中记下的开始一样（之后没有会话写入就一直不算）
+    private var heldStart: Date?
+    /// agy：还没按「主动开始」的回看窗口（24 小时）找过步骤记录。第一次有会话写入的证据时找一次（启动时或之后）
+    private var offlineLookbackPending = true
+
+    /// 启动时、QuotaPet 第一次自己查额度之前调用：记下开始记录文件（Claude 的 history.jsonl）此刻的修改时间。
+    /// 这次查询的 CLI 可能改写它，改写之后离线期间用户最后一次提交提示词的时间就看不到了
+    func captureOfflineStarts() {
+        for time in ledger.startFileTimes() { hold(time) }
+    }
+
+    private func hold(_ time: Date) {
+        if heldStart.map({ time > $0 }) ?? true { heldStart = time }
+    }
+
+    /// 有会话写入了：挂着的离线开始照常判一次（QuotaPet 自己查询留下的仍算自己的）。和这次报的开始是同一个时间时不重复报
+    private func releaseHeld(except reported: Date?) {
+        guard let held = heldStart else { return }
+        heldStart = nil
+        let now = Date()
+        guard held != reported, held >= now.addingTimeInterval(-ActivityLedger.startLookback),
+              held <= now.addingTimeInterval(ActivityLedger.futureTolerance) else { return }
+        route(held)
+    }
 
     /// 查询结束后，把挂起的主动开始重新判一遍：是用户的就补报
     func recheckPendingStarts() {
@@ -861,9 +924,15 @@ final class ActivityWatch {
     /// 建监听流（自检时可以换掉，模拟失败）
     var makeWatcher: ([String], @escaping ([FileEvent]) -> Void) -> FileWatcher? = { FileWatcher(paths: $0, onChange: $1) }
 
-    init(source: ActivitySource) {
+    /// clock：读步骤记录时判断「在未来」用的时钟；beforeTranscriptRead：测试用的后台钩子（见上）
+    init(source: ActivitySource, clock: @escaping @Sendable () -> Date = { Date() },
+         beforeTranscriptRead: (@Sendable () -> Void)? = nil) {
         ledger = ActivityLedger(source: source, window: ActiveService.window)
+        transcripts = AgyTranscriptReader(clock: clock)
+        self.clock = clock
+        self.beforeTranscriptRead = beforeTranscriptRead
     }
+    private let clock: @Sendable () -> Date
 
     /// 接上（或重新接上）监听。启动时和每分钟兜底时调用；路径集合没变、也没被移动过时什么都不做
     func start() {
@@ -913,13 +982,18 @@ final class ActivityWatch {
         // agy 步骤记录有新行：用户自己发的消息算主动开始（只读新追加的行，只看来源、类型和时间）
         let roots = ledger.source.transcriptRoots
         if !roots.isEmpty {
-            let now = Date()
+            let now = clock()
             for path in Set(events.map(\.path).filter { AgyTranscript.isTranscript($0, roots: roots) }) {
-                if let time = transcripts.read(path, now: now, window: ledger.window) { activity(ActivityFinding(time: time, start: time)) }
+                // 第一次见到的文件往回多看一些：早于 window 的用户消息先挂着，等有会话写入再算（见 heldStart）
+                guard let time = transcripts.read(path, now: now, window: ledger.window,
+                                                  firstReadLookback: ActivityLedger.startLookback) else { continue }
+                if time >= now.addingTimeInterval(-ledger.window) { activity(ActivityFinding(time: time, start: time)) } else { hold(time) }
             }
         }
         let parts = ledger.split(events)
-        if let found = ledger.observeFinding(parts.files, now: Date()) { activity(found) }
+        if let found = ledger.observeFinding(parts.files, now: Date()) {
+            activity(found, sessionWrite: ledger.lastFindingHadSessionWrite)
+        }
         if parts.full {
             scan(ledger.source.scanTargets, transcripts: true)
         } else if !parts.trees.isEmpty {
@@ -935,20 +1009,39 @@ final class ActivityWatch {
             return
         }
         scanning = true
-        let ledger = ledger, reader = transcripts, now = Date()
+        let ledger = ledger, reader = transcripts, now = Date(), hook = beforeTranscriptRead, clock = clock
         let roots = withTranscripts ? ledger.source.transcriptRoots : []
+        let lookbackPending = offlineLookbackPending
         scanQueue.async { [weak self] in
             let found = ledger.collect(directories, now: now)
-            // agy 步骤记录：window 以内改过的，读新行（第一次见到的读末尾一段），找用户自己发的消息
-            let userInput = AgyTranscriptReader.recentTranscripts(roots: roots, since: now.addingTimeInterval(-ledger.window))
-                .compactMap { reader.read($0, now: now, window: ledger.window) }.max()
+            hook?()
+            // agy 步骤记录：window 以内改过的，读新行（第一次见到的读末尾一段），找用户自己发的消息。
+            // 用读的这一刻的时间：排队以后才写的用户消息不能被当成未来记录跳过。
+            // 还没按回看窗口找过、这次又有会话写入的证据（会话文件 window 以内改过）：24 小时以内改过的步骤记录都读一遍——
+            // 用户消息可能早于 window，之后那个会话只有会话文件在写、步骤记录没再动过。
+            // 第一次见到的往回多看一些（早于 window 的先挂着，见 heldStart）
+            let (paths, lookback) = AgyTranscriptReader.transcriptsToRead(roots: roots, scan: found, now: now, window: ledger.window,
+                                                                          lookbackPending: lookbackPending)
+            let userInput = paths
+                .compactMap { reader.read($0, now: clock(), window: ledger.window, firstReadLookback: ActivityLedger.startLookback) }.max()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.scanning = false
+                    if lookback { self.offlineLookbackPending = false }
                     // 核对开始以后被实时事件更新过的文件，旧结果不会再记进去（ActivityLedger.applyFinding）
-                    if let finding = self.ledger.applyFinding(found, now: Date()) { self.activity(finding) }
-                    if let userInput { self.activity(ActivityFinding(time: userInput, start: userInput)) }
+                    let finding = self.ledger.applyFinding(found, now: Date())
+                    let sessionWrite = self.ledger.lastFindingHadSessionWrite
+                    if let userInput {
+                        if userInput >= self.clock().addingTimeInterval(-self.ledger.window) {
+                            self.activity(ActivityFinding(time: userInput, start: userInput))
+                        } else {
+                            self.hold(userInput)  // 早于 window：不算「现在在用」，等有会话写入再算
+                        }
+                    }
+                    if let finding { self.activity(finding, sessionWrite: sessionWrite) }
+                    // 这次按回看窗口找过：本来就是因为会话文件刚写过（可能已经被实时通知报过，这次核对没有新发现）
+                    if lookback, finding == nil { self.releaseHeld(except: nil) }
                     if !self.pendingScan.isEmpty || self.pendingTranscripts {
                         let next = self.pendingScan, again = self.pendingTranscripts
                         self.pendingScan = []
@@ -960,10 +1053,16 @@ final class ActivityWatch {
         }
     }
 
-    private func activity(_ finding: ActivityFinding) {
+    /// sessionWrite：其中有会话文件的真实写入（不只是开始记录文件）——挂着的离线开始这时才算；
+    /// agy 第一次有会话写入、还没按回看窗口找过步骤记录时，补找一次
+    private func activity(_ finding: ActivityFinding, sessionWrite: Bool = false) {
         let time = finding.time
         onActivity(time)
+        if sessionWrite { releaseHeld(except: finding.start) }
         if let start = finding.start { route(start) }
+        if sessionWrite, offlineLookbackPending, !ledger.source.transcriptRoots.isEmpty {
+            scan(ledger.source.scanTargets, transcripts: true)
+        }
         // 同一次写入已经报过（重复通知、后台核对又碰到）：不再安排补读
         if let reported = lastReported, time <= reported { return }
         lastReported = time

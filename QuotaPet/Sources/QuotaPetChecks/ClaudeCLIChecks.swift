@@ -244,6 +244,9 @@ func checkActiveServiceFollow() {
     checkRound4Follow()
     checkAgyTranscript()
     checkReviewFixes()
+    checkRecheckE87604f()
+    checkRecheckRound6()
+    checkRecheckRound7()
 }
 
 /// 第四轮：新会话按出生时间算、长任务不过期、自己查询的时间窗、Codex 子代理和旧格式、history 进重扫、删除和基线的交错（数据都是编的）
@@ -501,16 +504,21 @@ func checkAgyTranscript() {
         else { try! text.write(to: file, atomically: false, encoding: .utf8) }
     }
     append(line("USER_EXPLICIT", "USER_INPUT", base - 3600) + line("MODEL", "PLANNER_RESPONSE", base - 3599))
-    let reader = AgyTranscriptReader()
+    var clock = base  // 读到那一刻的时钟（可控）
+    let reader = AgyTranscriptReader(clock: { clock })
     check(reader.read(file.path, now: base, window: 600) == nil, "第一次见到：一小时前的用户消息不算现在在用")
     append(line("MODEL", "PLANNER_RESPONSE", base + 1))
+    clock = base + 2
     check(reader.read(file.path, now: base + 2, window: 600) == nil, "后台回复（模型的行）追加：不算主动开始")
     append(line("USER_EXPLICIT", "USER_INPUT", base + 10) + line("MODEL", "PLANNER_RESPONSE", base + 11))
+    clock = base + 12
     check(reader.read(file.path, now: base + 12, window: 600) == base + 10, "用户回到原会话再发一条：算，时间是消息自己的时间")
+    clock = base + 13
     check(reader.read(file.path, now: base + 13, window: 600) == nil, "没有新行：不再算")
     append(line("USER_EXPLICIT", "USER_INPUT", base + 100))
+    clock = base + 50
     check(reader.read(file.path, now: base + 50, window: 600) == nil, "时间在未来的不算")
-    let fresh = AgyTranscriptReader()
+    let fresh = AgyTranscriptReader(clock: { base + 120 })
     check(fresh.read(file.path, now: base + 120, window: 600) == base + 100, "晚接上（第一次见到）：末尾一段里 window 以内的用户消息补回来")
 }
 
@@ -552,4 +560,400 @@ func checkReviewFixes() {
     try! fm.moveItem(at: own, to: projects.appendingPathComponent("own"))
     check(ledger.observe([FileEvent(path: projects.appendingPathComponent("own").path, flags: [.itemRenamed, .itemIsDir])], now: Date()) == nil,
           "QuotaPet 自己查额度的专用目录移进来：不算")
+}
+
+/// 独立复检（main@e87604f）确认的三处：C01 清理只删本次查询、agy 补扫不漏掉排队后写入的用户消息、Codex 长任务冷启动恢复开始时间
+func checkRecheckE87604f() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("quotapet-e87604f-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+
+    // 1. C01：只删本次查询自己的会话
+    let home = root.appendingPathComponent("home")
+    let workDir = home.appendingPathComponent("Library/Application Support/QuotaPet/ClaudeQuotaCheck")
+    let project = home.appendingPathComponent(".claude/projects/" + ClaudeCLILocator.sessionFolderName(for: workDir))
+    try! fm.createDirectory(at: project, withIntermediateDirectories: true)
+    let ours = UUID(), concurrent = UUID().uuidString.lowercased()
+    let start = Date()
+    for (name, delta) in [(ClaudeSessionCleanup.idString(ours) + ".jsonl", 1.0), ("existing-active.jsonl", -2.0),
+                          (concurrent + ".jsonl", 1.0), ("existing-old.jsonl", -60.0)] {
+        let url = project.appendingPathComponent(name)
+        try! Data("{}\n".utf8).write(to: url)
+        try! fm.setAttributes([.modificationDate: start.addingTimeInterval(delta)], ofItemAtPath: url.path)
+    }
+    try! fm.createDirectory(at: project.appendingPathComponent(ClaudeSessionCleanup.idString(ours)), withIntermediateDirectories: true)
+    let removed = ClaudeSessionCleanup.remove(sessionID: ours, workingDirectory: workDir, home: home)
+    let left = (try? fm.contentsOfDirectory(atPath: project.path))?.sorted() ?? []
+    check(removed.count == 2 && left == [concurrent + ".jsonl", "existing-active.jsonl", "existing-old.jsonl"].sorted(),
+          "C01：只删本次查询的会话（和同名目录）；刚更新过的旧会话、同时新开的会话、更早的会话都留着：\(left)")
+    check(ClaudeSessionCleanup.remove(sessionID: UUID(), workingDirectory: workDir, home: home).isEmpty
+          && (try? fm.contentsOfDirectory(atPath: project.path))?.count == 3,
+          "C01：认不出归属（没有这次 ID 的文件）：什么都不删")
+
+    // 2. agy：后台核对排队后用户才写的消息，读到时按读的时刻判断，不当成未来记录跳过；之后的实时通知不再重复算
+    let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let queued = Date(timeIntervalSince1970: 1_795_289_000)
+    func step(_ at: Date) -> Data {
+        Data(#"{"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"\#(formatter.string(from: at))","content":"synthetic"}"#.utf8) + Data([10])
+    }
+    for firstRead in [true, false] {
+        let log = root.appendingPathComponent("transcript-\(firstRead).jsonl")
+        var clock = queued.addingTimeInterval(-1)
+        let reader = AgyTranscriptReader(clock: { clock })
+        if !firstRead {
+            try! step(queued.addingTimeInterval(-1)).write(to: log)
+            _ = reader.read(log.path, now: queued.addingTimeInterval(-1), window: 600)
+            let h = try! FileHandle(forWritingTo: log); h.seekToEndOfFile(); h.write(step(queued.addingTimeInterval(0.2))); try! h.close()
+        } else {
+            try! step(queued.addingTimeInterval(0.2)).write(to: log)
+        }
+        clock = queued.addingTimeInterval(1)  // 后台真正读的时候
+        let scanned = reader.read(log.path, now: queued, window: 600)  // now 是排队时取的
+        let live = reader.read(log.path, now: queued.addingTimeInterval(1.5), window: 600)
+        check(scanned == queued.addingTimeInterval(0.2) && live == nil,
+              "agy 补扫（\(firstRead ? "首次读末尾" : "增量")）：排队后写入的用户消息读到一次，实时通知不重复：\(String(describing: scanned)) \(String(describing: live))")
+    }
+    do {
+        // 同一个文件以两种写法到达（列目录得到的真实路径、实时通知经过符号链接的路径）：只算一次
+        let real = root.appendingPathComponent("transcript-alias.jsonl"), alias = root.appendingPathComponent("alias-dir")
+        try! FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
+        try! step(queued.addingTimeInterval(-5)).write(to: real)
+        let reader = AgyTranscriptReader(clock: { queued })
+        _ = reader.read(real.path, now: queued, window: 600)
+        let h = try! FileHandle(forWritingTo: real); h.seekToEndOfFile(); h.write(step(queued.addingTimeInterval(-1))); try! h.close()
+        let scanned = reader.read(real.path, now: queued, window: 600)
+        let live = reader.read(alias.appendingPathComponent("transcript-alias.jsonl").path, now: queued, window: 600)
+        check(scanned == queued.addingTimeInterval(-1) && live == nil,
+              "agy：同一个步骤记录换一种路径写法到达，不重复算主动开始：\(String(describing: scanned)) \(String(describing: live))")
+    }
+    do {
+        let log = root.appendingPathComponent("transcript-future.jsonl")
+        try! step(queued.addingTimeInterval(30)).write(to: log)
+        check(AgyTranscriptReader(clock: { queued.addingTimeInterval(1) }).read(log.path, now: queued, window: 600) == nil,
+              "agy：真正写着未来时间的记录照样不算")
+    }
+
+    // 3. Codex：跑了两个多小时的会话，冷启动从日志恢复它的开始时间；会话文件被换掉后按新文件判断
+    let codex = root.appendingPathComponent("codex"), sessions = codex.appendingPathComponent("sessions")
+    try! fm.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970).rounded(.down))
+    func turn(_ at: Date) -> String { #"{"timestamp":"\#(formatter.string(from: at))","type":"turn_context"}"# + "\n" }
+    func usage(_ at: Date) -> String { #"{"timestamp":"\#(formatter.string(from: at))","type":"event_msg","payload":{"type":"token_count"}}"# + "\n" }
+    let started = now.addingTimeInterval(-7201)
+    try! (turn(started) + usage(now.addingTimeInterval(-3600)) + usage(now.addingTimeInterval(-20)))
+        .write(to: sessions.appendingPathComponent("long.jsonl"), atomically: true, encoding: .utf8)
+    let cold = try! CodexProvider(home: codex).snapshot(now: now)
+    check(cold.lastStartAt == started && cold.lastActiveAt == now.addingTimeInterval(-20),
+          "Codex 长任务开始于两个多小时前、20 秒前还在写：冷启动恢复它的开始时间：\(String(describing: cold.lastStartAt))")
+    let reused = sessions.appendingPathComponent("reused.jsonl")
+    try! (#"{"type":"session_meta","payload":{"source":{"subagent":{}}}}"# + "\n" + turn(now.addingTimeInterval(-30)))
+        .write(to: reused, atomically: true, encoding: .utf8)
+    let warm = CodexLogScanner(home: codex)
+    _ = warm.refresh(now: now)
+    let before = warm.lastStart(asOf: now)
+    try! (#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n" + turn(now.addingTimeInterval(-1)))
+        .write(to: reused, atomically: true, encoding: .utf8)
+    _ = warm.refresh(now: now)
+    check(before == started && warm.lastStart(asOf: now) == now.addingTimeInterval(-1),
+          "Codex 会话文件被换成普通会话：不再沿用旧文件的子代理状态，新开始照算")
+}
+
+/// 第六轮复检（fix-c01-scan-restart 的独立复检）：清理不碰共享文件夹、离线期间的主动开始、未来记录永久清除、
+/// 等长原子替换、步骤记录文件本身是链接、读取中途时钟回拨、CLI 不认 --session-id
+func checkRecheckRound6() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("quotapet-round6-\(UUID().uuidString)")
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+
+    // 1. C01：本次查询的文件是文件夹里最后一个，删完后文件夹仍留着；之后才写进来的并发会话照样在
+    do {
+        let home = root.appendingPathComponent("cleanup")
+        let workDir = home.appendingPathComponent("Library/Application Support/QuotaPet/ClaudeQuotaCheck")
+        let folder = home.appendingPathComponent(".claude/projects/" + ClaudeCLILocator.sessionFolderName(for: workDir))
+        try! fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let ours = UUID(), id = ClaudeSessionCleanup.idString(ours)
+        try! Data("{}\n".utf8).write(to: folder.appendingPathComponent(id + ".jsonl"))
+        try! fm.createDirectory(at: folder.appendingPathComponent(id), withIntermediateDirectories: true)
+        let removed = ClaudeSessionCleanup.remove(sessionID: ours, workingDirectory: workDir, home: home)
+        var isDirectory: ObjCBool = false
+        let kept = fm.fileExists(atPath: folder.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        let concurrent = folder.appendingPathComponent("concurrent-session.jsonl")
+        try? Data("{}\n".utf8).write(to: concurrent)
+        check(removed == [id + ".jsonl", id] && kept && fm.fileExists(atPath: concurrent.path),
+              "C01：删完本次查询的会话后共享文件夹留着，随后写进来的并发会话不会被一起删掉：\(removed) kept=\(kept)")
+    }
+
+    // 2. 离线期间的主动开始：提示词在 11 分钟前提交（早于 10 分钟窗口），旧会话 1 秒前还在输出
+    do {
+        let home = root.appendingPathComponent("offline")
+        let project = home.appendingPathComponent(".claude/projects/p")
+        try! fm.createDirectory(at: project, withIntermediateDirectories: true)
+        let history = home.appendingPathComponent(".claude/history.jsonl"), session = project.appendingPathComponent("existing.jsonl")
+        try! Data("{}\n".utf8).write(to: history); try! Data("{}\n".utf8).write(to: session)
+        try! fm.setAttributes([.modificationDate: now.addingTimeInterval(-660)], ofItemAtPath: history.path)
+        try! fm.setAttributes([.creationDate: now.addingTimeInterval(-3600), .modificationDate: now.addingTimeInterval(-1)], ofItemAtPath: session.path)
+        let source = ActivitySource.claude(home: home, ownFolder: "own")
+        let ledger = ActivityLedger(source: source, window: ActiveService.window)
+        let found = ledger.applyFinding(ledger.collect(source.scanTargets, now: now), now: now)
+        check(found?.time == now.addingTimeInterval(-1) && found?.start == now.addingTimeInterval(-660),
+              "离线期间提交的提示词早于 10 分钟窗口、这家仍在用：活动按 1 秒前，主动开始按 11 分钟前：\(String(describing: found))")
+        let picked = ActiveService.pick(lastActive: [.claude: now.addingTimeInterval(-1), .codex: now.addingTimeInterval(-30)],
+                                        lastStart: [.codex: now.addingTimeInterval(-7200), .claude: found?.start ?? .distantPast], now: now)
+        check(picked == .claude, "离线期间切到 Claude 的主动开始压过两小时前的 Codex 开始：\(String(describing: picked))")
+        check(ledger.applyFinding(ledger.collect(source.scanTargets, now: now.addingTimeInterval(1)), now: now.addingTimeInterval(1)) == nil,
+              "同一个 history.jsonl 再核对一遍：没有变化，不再报开始")
+        // 对照：这家已经不在用（会话 15 分钟前就停了）：早于窗口的提示词不算开始，也不算活动
+        let idleHome = root.appendingPathComponent("offline-idle"), idleProject = idleHome.appendingPathComponent(".claude/projects/p")
+        try! fm.createDirectory(at: idleProject, withIntermediateDirectories: true)
+        let idleHistory = idleHome.appendingPathComponent(".claude/history.jsonl"), idleSession = idleProject.appendingPathComponent("s.jsonl")
+        try! Data("{}\n".utf8).write(to: idleHistory); try! Data("{}\n".utf8).write(to: idleSession)
+        try! fm.setAttributes([.modificationDate: now.addingTimeInterval(-660)], ofItemAtPath: idleHistory.path)
+        try! fm.setAttributes([.creationDate: now.addingTimeInterval(-3600), .modificationDate: now.addingTimeInterval(-900)], ofItemAtPath: idleSession.path)
+        let idleSource = ActivitySource.claude(home: idleHome, ownFolder: "own")
+        let idle = ActivityLedger(source: idleSource, window: ActiveService.window)
+        check(idle.applyFinding(idle.collect(idleSource.scanTargets, now: now), now: now) == nil,
+              "这家已经停下：早于窗口的提示词不当成现在的活动，也不单独报开始")
+    }
+
+    // 3. Codex：时钟回拨后判为未来的开始永久删掉（时间追上也不复活），同一会话里较早的合法开始留着
+    do {
+        let home = root.appendingPathComponent("codex-future"), sessions = home.appendingPathComponent("sessions")
+        try! fm.createDirectory(at: sessions, withIntermediateDirectories: true)
+        func turn(_ at: Date) -> String { #"{"type":"turn_context","timestamp":"\#(formatter.string(from: at))"}"# + "\n" }
+        let future = now.addingTimeInterval(3600)
+        try! turn(future).write(to: sessions.appendingPathComponent("only-future.jsonl"), atomically: true, encoding: .utf8)
+        try! (turn(now.addingTimeInterval(-100)) + turn(future.addingTimeInterval(1)))
+            .write(to: sessions.appendingPathComponent("mixed.jsonl"), atomically: true, encoding: .utf8)
+        let scanner = CodexLogScanner(home: home)
+        _ = scanner.refresh(now: future.addingTimeInterval(1))
+        let initial = scanner.lastStart(asOf: future.addingTimeInterval(1))
+        let rolledBack = scanner.lastStart(asOf: now)
+        let caughtUp = scanner.lastStart(asOf: future.addingTimeInterval(1))
+        check(initial == future.addingTimeInterval(1) && rolledBack == now.addingTimeInterval(-100) && caughtUp == now.addingTimeInterval(-100),
+              "Codex：时钟回拨后未来的开始永久删掉，时间追上也不复活；较早的合法开始还在：\(String(describing: initial)) \(String(describing: rolledBack)) \(String(describing: caughtUp))")
+    }
+
+    // 4. Codex：约 310 KB 的普通会话被原子替换成等长的子代理日志：热扫描、冷扫描都不把子代理的开始当成主动开始
+    do {
+        let home = root.appendingPathComponent("codex-same-size"), sessions = home.appendingPathComponent("sessions")
+        try! fm.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let log = sessions.appendingPathComponent("session.jsonl")
+        let realStart = now.addingTimeInterval(-120), childStart = now.addingTimeInterval(-10)
+        func bytes(source: String, start: Date) -> Data {
+            let meta = #"{"type":"session_meta","payload":{"source":\#(source)}}"# + "\n"
+            let tail = "\n" + #"{"timestamp":"\#(formatter.string(from: start))","type":"turn_context"}"# + "\n"
+            let shell = #"{"type":"response_item","payload":""}"#
+            let padding = String(repeating: "x", count: 310_000 - meta.utf8.count - tail.utf8.count - shell.utf8.count)
+            return Data((meta + #"{"type":"response_item","payload":""# + padding + #""}"# + tail).utf8)
+        }
+        try! bytes(source: #""cli""#, start: realStart).write(to: log)
+        try! fm.setAttributes([.modificationDate: now.addingTimeInterval(-100)], ofItemAtPath: log.path)
+        let warm = CodexLogScanner(home: home)
+        _ = warm.refresh(now: now)
+        let replacement = bytes(source: #"{"subagent":{}}"#, start: childStart)
+        try! replacement.write(to: log, options: .atomic)
+        try! fm.setAttributes([.modificationDate: now.addingTimeInterval(-1)], ofItemAtPath: log.path)
+        _ = warm.refresh(now: now)
+        let cold = CodexLogScanner(home: home)
+        _ = cold.refresh(now: now)
+        check(replacement.count == 310_000 && warm.lastActivity(asOf: now) == childStart && warm.lastStart(asOf: now) == realStart
+              && cold.lastStart(asOf: now) == nil,
+              "Codex 等长原子替换成子代理日志：热扫描不把它当成新的主动开始（只留原来真实的开始），冷扫描也不算：\(String(describing: warm.lastStart(asOf: now))) \(String(describing: cold.lastStart(asOf: now)))")
+    }
+
+    // 5. agy：步骤记录文件本身是符号链接。先读链接、或先读真实文件再读链接，同一条用户消息都恰好报一次
+    do {
+        let message = #"{"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"\#(formatter.string(from: now.addingTimeInterval(-2)))","content":""# + String(repeating: "x", count: 2048) + #""}"# + "\n"
+        for linkFirst in [true, false] {
+            let real = root.appendingPathComponent("leaf-\(linkFirst).jsonl"), link = root.appendingPathComponent("leaf-link-\(linkFirst).jsonl")
+            try! Data(message.utf8).write(to: real)
+            try! fm.createSymbolicLink(at: link, withDestinationURL: real)
+            let reader = AgyTranscriptReader(clock: { now })
+            let first = reader.read((linkFirst ? link : real).path, now: now, window: 600)
+            let second = reader.read((linkFirst ? real : link).path, now: now, window: 600)
+            check(first == now.addingTimeInterval(-2) && second == nil,
+                  "agy：步骤记录文件本身是链接，\(linkFirst ? "先读链接" : "先读真实文件再读链接")：同一条消息恰好报一次：\(String(describing: first)) \(String(describing: second))")
+        }
+    }
+
+    // 6. agy：读取中途时钟回拨两分钟。同一批里一条按回拨后的时钟合法、一条仍在未来：保住合法的那条
+    do {
+        func step(_ at: Date) -> String { #"{"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"\#(formatter.string(from: at))","content":"s"}"# + "\n" }
+        let log = root.appendingPathComponent("rollback.jsonl")
+        try! (step(now.addingTimeInterval(-130)) + step(now.addingTimeInterval(-60))).write(to: log, atomically: true, encoding: .utf8)
+        let rolled = AgyTranscriptReader(clock: { now.addingTimeInterval(-120) })
+        check(rolled.read(log.path, now: now, window: 600) == now.addingTimeInterval(-130),
+              "agy：读取时时钟已回拨两分钟：仍在未来的那条不算，按新时钟合法的那条保住")
+        // 第一次读末尾时往回多看：QuotaPet 没运行时发的、早于窗口的用户消息
+        let early = root.appendingPathComponent("early.jsonl")
+        try! step(now.addingTimeInterval(-660)).write(to: early, atomically: true, encoding: .utf8)
+        check(AgyTranscriptReader(clock: { now }).read(early.path, now: now, window: 600) == nil
+              && AgyTranscriptReader(clock: { now }).read(early.path, now: now, window: 600, firstReadLookback: ActivityLedger.startLookback) == now.addingTimeInterval(-660),
+              "agy：第一次读末尾时可以往回多看，找到 QuotaPet 没运行时发的、早于窗口的用户消息")
+    }
+
+    // 7. CLI 不认 --session-id：认得出这个画面（查询据此马上返回兼容性错误，不等超时）
+    do {
+        var rejected = VirtualTerminal(rows: 10, columns: 80)
+        rejected.feed("error: unknown option '--session-id'\r\n")
+        var prompt = VirtualTerminal(rows: 10, columns: 80)
+        prompt.feed("Welcome to Claude Code\r\n")
+        check(ClaudeCLIScreen.rejectsSessionID(rejected) && !ClaudeCLIScreen.rejectsSessionID(prompt),
+              "CLI 不认 --session-id 的报错认得出，普通画面不误认")
+    }
+}
+
+/// 第六轮独立复检的五项：Claude 冷启动与自查的竞态、agy 离线步骤文件的枚举、Codex 未来记录重新读入、agy 批内回拨、登录与旧额度同屏
+func checkRecheckRound7() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("quotapet-round7-\(UUID().uuidString)")
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+    let iso = ISO8601DateFormatter()
+    func turn(_ t: Date) -> String { "{\"timestamp\":\"\(iso.string(from: t))\",\"type\":\"turn_context\"}\n" }
+
+    // 1. 判定对照更早的查询时段：启动时固定的上一次运行的那次，覆盖设置之后仍认得出
+    do {
+        let previous = (started: now.addingTimeInterval(-700), ended: now.addingTimeInterval(-690))
+        let current = (started: now.addingTimeInterval(-0.4), ended: now)
+        check(StartVerdict.judge(now.addingTimeInterval(-695), querying: false, started: current.started, ended: current.ended,
+                                 earlier: [previous]) == .own
+              && StartVerdict.judge(now.addingTimeInterval(-660), querying: false, started: current.started, ended: current.ended,
+                                    earlier: [previous]) == .user
+              && StartVerdict.judge(now, querying: true, started: current.started, ended: nil, earlier: [previous]) == .undecided,
+              "上一次运行自己的查询留下的写入：本次查询覆盖设置后仍按自己的算；时段外的仍是用户的")
+    }
+
+    // 2. 启动时取下 history.jsonl 的修改时间（之后被本次查询改写也不影响）；只有开始记录文件的写入不算会话写入
+    do {
+        let history = "/synthetic/.claude/history.jsonl", session = "/synthetic/.claude/projects/p/s.jsonl"
+        let source = ActivitySource(roots: [], scanDirectories: [URL(fileURLWithPath: "/synthetic/.claude/projects")], isSessionFile: { _ in true },
+                                    isStartFile: { $0 == history }, scanFiles: [URL(fileURLWithPath: history)])
+        var stamps = [history: FileStamp(inode: 1, size: 1, modified: now.addingTimeInterval(-660))]
+        let ledger = ActivityLedger(source: source, window: ActiveService.window, stamp: { stamps[$0] }, list: { _ in stamps[session] == nil ? [] : [session] })
+        let held = ledger.startFileTimes()
+        stamps[history] = FileStamp(inode: 1, size: 2, modified: now)
+        let ownOnly = ledger.applyFinding(ledger.collect(source.scanTargets, now: now), now: now)
+        let ownOnlySession = ledger.lastFindingHadSessionWrite
+        stamps[session] = FileStamp(inode: 2, size: 1, modified: now.addingTimeInterval(-1), created: now.addingTimeInterval(-9000))
+        let withSession = ledger.applyFinding(ledger.collect(source.scanTargets, now: now), now: now)
+        check(held == [now.addingTimeInterval(-660)] && ownOnly != nil && !ownOnlySession && withSession != nil && ledger.lastFindingHadSessionWrite,
+              "启动时取下的 history.jsonl 修改时间不受之后的改写影响；只有它被写不算会话写入，会话文件有写入才算")
+    }
+
+    // 3. agy：有会话写入的证据、还没按回看窗口找过时，24 小时以内改过的步骤记录都读（步骤文件本身 11 分钟没动过）
+    do {
+        let home = root.appendingPathComponent("agy")
+        let steps = home.appendingPathComponent(".gemini/antigravity/brain/t/.system_generated/logs/transcript.jsonl")
+        let session = home.appendingPathComponent(".gemini/antigravity/conversations/t.pb")
+        try! fm.createDirectory(at: steps.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! fm.createDirectory(at: session.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! Data("{\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"created_at\":\"\(iso.string(from: now.addingTimeInterval(-660)))\"}\n".utf8).write(to: steps)
+        try! Data("x".utf8).write(to: session)
+        try! fm.setAttributes([.modificationDate: now.addingTimeInterval(-660)], ofItemAtPath: steps.path)
+        let source = ActivitySource.agy(home: home)
+        let ledger = ActivityLedger(source: source, window: ActiveService.window)
+        func pick(_ sessionAt: Date, pending: Bool) -> (Int, Bool) {
+            try! fm.setAttributes([.modificationDate: sessionAt], ofItemAtPath: session.path)
+            let r = AgyTranscriptReader.transcriptsToRead(roots: source.transcriptRoots, scan: ledger.collect(source.scanTargets, now: now),
+                                                          now: now, window: ledger.window, lookbackPending: pending)
+            return (r.paths.count, r.lookback)
+        }
+        let active = pick(now.addingTimeInterval(-1), pending: true)
+        let idle = pick(now.addingTimeInterval(-1200), pending: true)
+        let done = pick(now.addingTimeInterval(-1), pending: false)
+        let found = AgyTranscriptReader(clock: { now }).read(steps.path, now: now, window: ledger.window, firstReadLookback: ActivityLedger.startLookback)
+        check(active == (1, true) && idle == (0, false) && done == (0, false) && found == now.addingTimeInterval(-660),
+              "agy：会话文件刚写过才按 24 小时回看找步骤记录（只找一次），步骤文件没有近期 MODEL 行也找得到 11 分钟前的用户消息：\(active) \(idle) \(done)")
+    }
+
+    // 4. Codex：被丢掉的未来记录按会话逐条记住，改修改时间重扫、共用失效记录的新扫描器都不读回来；同一会话之后真正新写的照常算
+    do {
+        let home = root.appendingPathComponent("codex"), sessions = home.appendingPathComponent("sessions")
+        try! fm.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let file = sessions.appendingPathComponent("rollout-a.jsonl")
+        let earlier = now.addingTimeInterval(-10_800), future = now.addingTimeInterval(3600)
+        try! Data((turn(earlier) + turn(future)).utf8).write(to: file)
+        final class Store: @unchecked Sendable { var saved: [String: Double] = [:] }
+        let store = Store()
+        func records() -> CodexRejectedRecords { CodexRejectedRecords(stored: store.saved, save: { store.saved = $0 }) }
+        var clock = future
+        let warm = CodexLogScanner(home: home, rejected: records(), clock: { clock })
+        _ = warm.refresh(now: future)
+        clock = now
+        let rolledBack = warm.lastStart(asOf: now)
+        clock = future
+        try! fm.setAttributes([.modificationDate: future], ofItemAtPath: file.path)
+        _ = warm.refresh(now: future)
+        let touched = warm.lastStart(asOf: future)
+        let cold = CodexLogScanner(home: home, rejected: records(), clock: { clock })
+        _ = cold.refresh(now: future)
+        let coldStart = cold.lastStart(asOf: future)
+        let genuine = future.addingTimeInterval(-60)
+        let handle = try! FileHandle(forWritingTo: file); try! handle.seekToEnd(); try! handle.write(contentsOf: Data(turn(genuine).utf8)); try! handle.close()
+        _ = cold.refresh(now: future)
+        check(rolledBack == earlier && touched == earlier && coldStart == earlier && cold.lastStart(asOf: future) == genuine
+              && store.saved.count == 1 && !store.saved.keys.contains { $0.contains("rollout") },
+              "Codex：回拨丢掉的未来开始在重扫、重启后都不复活，之后真正新写的照常算；设置里只存指纹和时间：\(store.saved.count)")
+
+        // 一条三小时前的合法开始 + 四条读到时就在未来的：合法的不被挤掉
+        try! Data(([earlier] + (1...4).map { now.addingTimeInterval(Double($0 * 300)) }).map(turn).joined().utf8).write(to: file, options: .atomic)
+        let bounded = CodexLogScanner(home: home, clock: { now })
+        _ = bounded.refresh(now: now)
+        // 五条读到时都合法，回拨后较新的四条都在未来：下一次刷新找回较早那条
+        var rolling = now
+        try! Data(([earlier] + (1...4).map { now.addingTimeInterval(Double(-7200 + $0 * 600)) }).map(turn).joined().utf8).write(to: file, options: .atomic)
+        let five = CodexLogScanner(home: home, clock: { rolling })
+        _ = five.refresh(now: now)
+        rolling = now.addingTimeInterval(-7200 + 300)
+        _ = five.refresh(now: rolling)
+        check(bounded.lastStart(asOf: now) == earlier && five.lastStart(asOf: rolling) == earlier,
+              "Codex：先验时间再占名额，未来的开始挤不掉较早的合法开始；回拨后较新的几条全被丢掉时重读找回较早那条")
+    }
+
+    // 4b. 读日志的过程中才写进来的记录（时间晚于这次 snapshot 的 now、早于读到它的那一刻）：照常算，不进失效记录
+    do {
+        let home = root.appendingPathComponent("codex-during-read"), sessions = home.appendingPathComponent("sessions")
+        try! fm.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let during = now.addingTimeInterval(0.5)
+        let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        try! Data("{\"timestamp\":\"\(fractional.string(from: during))\",\"type\":\"turn_context\"}\n".utf8)
+            .write(to: sessions.appendingPathComponent("rollout-b.jsonl"))
+        final class Clock: @unchecked Sendable { var calls = 0 }
+        let tick = Clock()
+        final class Store: @unchecked Sendable { var saved: [String: Double] = [:] }
+        let store = Store()
+        // 第一次取时钟是 now（snapshot 开始），之后读的过程中时钟已到 now + 1
+        let provider = CodexProvider(home: home, rejected: CodexRejectedRecords(save: { store.saved = $0 }),
+                                     clock: { tick.calls += 1; return tick.calls == 1 ? now : now.addingTimeInterval(1) })
+        let snapshot = try? provider.snapshot(now: now)
+        check(snapshot?.lastStartAt == during && store.saved.isEmpty,
+              "Codex：读日志时才写进来的开始（晚于 snapshot 的 now）照常算，不被当成未来永久丢掉：\(String(describing: snapshot?.lastStartAt)) rejected=\(store.saved.count)")
+    }
+
+    // 5. agy：同一批里先读到的那条在读完时已因回拨变成未来，返回按最后的时钟合法的那条
+    do {
+        let file = root.appendingPathComponent("agy-batch.jsonl")
+        func line(_ t: Date) -> String { "{\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"created_at\":\"\(iso.string(from: t))\"}\n" }
+        try! Data((line(now.addingTimeInterval(-1)) + line(now.addingTimeInterval(-121))).utf8).write(to: file)
+        var calls = 0
+        let reader = AgyTranscriptReader(clock: { calls += 1; return calls == 1 ? now : now.addingTimeInterval(-120) })
+        check(reader.read(file.path, now: now, window: 600) == now.addingTimeInterval(-121),
+              "agy：批内回拨后，已选的那条按最后的时钟复核，合法的较早一条不被游标越过")
+    }
+
+    // 6. 登录提示在旧额度文字之后：最后的画面是登录；反过来仍是额度
+    do {
+        var mixed = VirtualTerminal(rows: 60, columns: 160)
+        mixed.feed(Array("Current session 10% used\nNot logged in\n".utf8))
+        var usage = VirtualTerminal(rows: 60, columns: 160)
+        usage.feed(Array("Not logged in\nCurrent session 10% used\n".utf8))
+        check(ClaudeCLIScreen.finalScreen(mixed) == .login && ClaudeCLIScreen.finalScreen(usage) == .usageReady
+              && ClaudeCLIScreen.classify(mixed) == .usageReady,
+              "CLI 最后显示的是登录提示时按登录处理（屏幕上残留的旧额度文字不算）")
+    }
 }
