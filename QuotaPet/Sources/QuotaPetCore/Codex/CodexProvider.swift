@@ -24,10 +24,12 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
         guard snapshot.provider == .codex, snapshot.hasData, let readAt = snapshot.officialAt,
               now.timeIntervalSince(readAt) >= staleAfter else { return snapshot }
         let ago = Fmt.ago(readAt, now: now)
-        return UsageSnapshot(provider: .codex, windows: [], generatedAt: now, officialAt: readAt,
-                             notes: [tr("Codex 最近一次记下官方读数是\(ago)（最后一次在这台 Mac 上用 Codex 时）。超过 1 小时的读数不当作现在的额度；在本机用一次 Codex 就会更新，或在官方页面查看。",
-                                        "Codex last recorded an official reading \(ago), the last time you used it on this Mac. Readings older than an hour aren’t treated as current usage; use Codex here once to update it, or check the official page.")],
+        var expired = UsageSnapshot(provider: .codex, windows: [], generatedAt: now, officialAt: readAt, lastActiveAt: snapshot.lastActiveAt,
+                             notes: [tr("Codex 最近一次记下官方总额度读数是\(ago)。超过 1 小时的读数不当作现在的额度；本机 Codex 下次在日志里记下总额度时会更新，也可以在官方页面查看。",
+                                        "Codex last recorded an overall quota reading \(ago). Readings older than an hour aren’t treated as current usage; it updates when Codex on this Mac next records the overall quota in its logs, or check the official page.")],
                              hasData: false)
+        expired.lastStartAt = snapshot.lastStartAt
+        return expired
     }
 
     public static var missingNote: String {
@@ -44,8 +46,8 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
     /// 读数太久没更新时给用户看的那句话（预览图也用它）
     public static func staleNote(readAt: Date, now: Date) -> String {
         let ago = Fmt.ago(readAt, now: now)
-        return tr("Codex 的读数停在\(ago)（最后一次在这台 Mac 上用 Codex 时）。网页、Dot 等云端任务的用量要等下次在本机用 Codex 才会更新。",
-                  "The last Codex reading was \(ago), the last time you used Codex on this Mac. Usage from the web or cloud tasks (such as Dots) shows up the next time you use it here.")
+        return tr("Codex 的总额度读数停在\(ago)。网页、Dot 等云端任务的用量，要等本机 Codex 下次在日志里记下总额度才会反映出来。",
+                  "The last overall Codex quota reading was \(ago). Usage from the web or cloud tasks (such as Dots) shows up the next time Codex on this Mac records the overall quota in its logs.")
     }
 
     public init(home: URL = CodexLogScanner.defaultHome) {
@@ -59,13 +61,18 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
     public func snapshot(now: Date) throws -> UsageSnapshot {
         // 时间戳在未来的读数（时钟偏差）还不算数，等时间追上了再参与（扫描器里留着）
         let all = scanner.refresh(now: now).filter { $0.time <= now }
+        // 最近一次在本机用 Codex：任何 token_count 事件都算，不管有没有带总额度（自动跟随、宠物的「闲了多久」用它）
+        let activeAt = scanner.lastActivity(asOf: now)
+        let startAt = scanner.lastStart(asOf: now)
         // 只看 Codex 的总额度：个别模型自己的额度不能顶替它（那会把某个模型的百分比当成总额度）
         let readings = all.filter(\.isMain)
         lastReadings = readings
         guard let latest = readings.last else {
             // 只有个别模型的记录：说总额度缺数据，不拿它们凑
-            return UsageSnapshot(provider: .codex, windows: [], generatedAt: now,
-                                 notes: [all.isEmpty ? Self.missingNote : Self.mainMissingNote], hasData: false)
+            var empty = UsageSnapshot(provider: .codex, windows: [], generatedAt: now, lastActiveAt: activeAt,
+                                      notes: [all.isEmpty ? Self.missingNote : Self.mainMissingNote], hasData: false)
+            empty.lastStartAt = startAt
+            return empty
         }
         let windows = latest.windows.sorted { $0.minutes < $1.minutes }.map {
             window($0, readings: readings, readAt: latest.time, now: now)
@@ -74,9 +81,11 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
         if now.timeIntervalSince(latest.time) > Self.staleAfter, windows.contains(where: { $0.official != nil }) {
             notes.append(Self.staleNote(readAt: latest.time, now: now))
         }
-        // 每轮对话结束记一次读数，最近一次读数的时间就是最近一次使用
-        return UsageSnapshot(provider: .codex, windows: windows, generatedAt: now, officialAt: latest.time, lastActiveAt: latest.time,
-                             notes: notes)
+        // 百分比只用总额度读数；最近一次使用另算（没带额度的那轮也算），至少不早于最近一次读数
+        var snapshot = UsageSnapshot(provider: .codex, windows: windows, generatedAt: now, officialAt: latest.time,
+                                     lastActiveAt: max(activeAt ?? latest.time, latest.time), notes: notes)
+        snapshot.lastStartAt = startAt
+        return snapshot
     }
 
     /// 一个额度窗口。读数就是官方百分比，不用估算；最近一次读数之后已经重置过的窗口算 0，等下次使用再开始

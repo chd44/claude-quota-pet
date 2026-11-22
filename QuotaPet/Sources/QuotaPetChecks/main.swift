@@ -836,7 +836,7 @@ do {
     check(try! provider.snapshot(now: at(20, 13, 50)).notes.isEmpty, "读数不到 1 小时：没有提示")
     check(later.notes.contains { $0.contains("Dot") }, "读数 2 小时没更新：提醒云端任务（Dot）的用量要等下次本机使用")
     let staleSnap = try! provider.snapshot(now: at(21, 3))
-    check(staleSnap.notes.contains { $0.contains("Codex 的读数停在") }, "读数太久没更新时提醒：\(staleSnap.notes)")
+    check(staleSnap.notes.contains { $0.contains("Codex 的总额度读数停在") }, "读数太久没更新时提醒：\(staleSnap.notes)")
 
     let empty = try! CodexProvider(home: home.appendingPathComponent("none")).snapshot(now: at(20, 13))
     check(!empty.hasData && empty.notes == [CodexProvider.missingNote], "没用过 Codex：没有数据")
@@ -866,6 +866,75 @@ do {  // 第一次扫描（刚启动）也要读到「现在 − 24 小时」之
     let weekly = try! CodexProvider(home: home).snapshot(now: at(20, 13)).window("seven_day")
     check(near(weekly?.burnPerHour, 13.0 / 24), "刚启动时每周的消耗速度也从 24 小时前的 62% 算起：\(String(describing: weekly?.burnPerHour))")
     try? FileManager.default.removeItem(at: home)
+}
+
+do {  // 「在用 Codex」和「总额度读数」分开记：没带额度、只带个别模型额度的那轮也算在用（自动跟随要靠它），百分比照旧只用总额度
+    let home = FileManager.default.temporaryDirectory.appendingPathComponent("quotapet-codex-activity-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: home) }
+    let sessions = home.appendingPathComponent("sessions/2026/09/20"), archived = home.appendingPathComponent("archived_sessions")
+    for dir in [sessions, archived] { try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+    let file = sessions.appendingPathComponent("rollout-act.jsonl")
+    let formatter = ISO8601DateFormatter()
+    func noQuota(_ time: Date) -> String {  // 有用量、rate_limits 是 null 的 token_count（上游测试里有这种形状）
+        #"{"timestamp":"\#(formatter.string(from: time))","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":90}},"rate_limits":null}}"#
+    }
+    func put(_ lines: [String], modified: Date) {
+        try! (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: file.path)
+    }
+    check(CodexRateReading.tokenEvent(line: Data(noQuota(at(20, 12)).utf8))?.time == at(20, 12)
+          && CodexRateReading.tokenEvent(line: Data(noQuota(at(20, 12)).utf8))?.reading == nil, "没带额度的 token_count：有时间、没有读数")
+    check(CodexRateReading.parse(line: Data(noQuota(at(20, 12)).utf8)) == nil, "没带额度的不算读数")
+    check(CodexRateReading.tokenEvent(line: Data(codexLine(at(20, 12), [(300, 20, at(20, 14))], type: "agent_message").utf8)) == nil,
+          "别的事件不算在用")
+
+    let provider = CodexProvider(home: home)
+    put([noQuota(at(20, 12))], modified: at(20, 12))
+    var snap = try! provider.snapshot(now: at(20, 12, 1))
+    check(!snap.hasData && snap.lastActiveAt == at(20, 12) && snap.officialAt == nil,
+          "只有没带额度的一轮：额度未知，但记下在用（OS/codex-no-quota-marks-activity）：\(String(describing: snap.lastActiveAt))")
+    put([noQuota(at(20, 12)), codexLine(at(20, 12, 2), limit: "codex_other", [(300, 40, at(20, 15))])], modified: at(20, 12, 2))
+    snap = try! provider.snapshot(now: at(20, 12, 3))
+    check(!snap.hasData && snap.notes == [CodexProvider.mainMissingNote] && snap.lastActiveAt == at(20, 12, 2),
+          "只有个别模型的额度：总额度缺数据，但也算在用（OS/codex-model-marks-activity）")
+    put([noQuota(at(20, 12)), codexLine(at(20, 12, 2), limit: "codex_other", [(300, 40, at(20, 15))]),
+         codexLine(at(20, 12, 4), [(300, 76, at(20, 15))]), noQuota(at(20, 12, 6))], modified: at(20, 12, 6))
+    snap = try! provider.snapshot(now: at(20, 12, 7))
+    check(snap.hasData && near(snap.window("five_hour")?.percent, 76) && snap.officialAt == at(20, 12, 4) && snap.lastActiveAt == at(20, 12, 6),
+          "来了总额度：百分比 76%（读数时间不变），之后没带额度的一轮把「在用」往后推")
+    snap = try! provider.snapshot(now: at(20, 12, 30))
+    check(snap.lastActiveAt == at(20, 12, 6), "重扫同一份日志不续期：还是记录自己的时间")
+    check(!CodexProvider.staleNote(readAt: at(20, 11), now: at(20, 12, 30)).contains("最后一次在这台 Mac 上用"),
+          "提醒只说总额度读数的时间，不把它说成最后一次使用（stale/older-reading-not-called-latest-use）")
+    let wrongEnvelope = #"{"timestamp":"2026-09-20T02:00:00Z","type":"response_item","payload":{"type":"token_count"}}"#
+    check(CodexRateReading.tokenEvent(line: Data(wrongEnvelope.utf8)) == nil, "外层不是 event_msg 的不算用量事件（parser/requires-event-envelope）")
+    try! FileManager.default.copyItem(at: file, to: archived.appendingPathComponent("rollout-act.jsonl"))
+    check(try! provider.snapshot(now: at(20, 12, 31)).lastActiveAt == at(20, 12, 6), "归档挪过去再读到一次也不续期")
+    let handle = try! FileHandle(forWritingTo: file)
+    handle.seekToEndOfFile()
+    handle.write(Data((noQuota(at(20, 18)) + "\n").utf8))  // 时钟偏差写出的未来时间
+    try! handle.close()
+    check(try! provider.snapshot(now: at(20, 12, 32)).lastActiveAt == at(20, 12, 6), "未来时间的记录不算，也不把真正最近的那次盖住")
+    check(try! CodexProvider(home: home).snapshot(now: at(20, 12, 33)).lastActiveAt == at(20, 12, 6), "冷启动扫同样的日志，结果一样")
+}
+
+do {  // 自动跟随不光在有新动静时判断：面板收起、开关重新打开、读数变了，都按现在的状态重新算（ActiveService.target）
+    let now = Date(timeIntervalSince1970: 90_000), minute: TimeInterval = 60
+    let codexOnly: [OfficialQuotaEntry: Date] = [.codex: now - 9 * minute - 59]
+    check(ActiveService.target(enabled: true, paused: true, manualAt: nil, lastActive: codexOnly, current: .claude, now: now) == nil,
+          "面板开着：先不切（panel/open-preserves）")
+    check(ActiveService.target(enabled: true, paused: false, manualAt: nil, lastActive: codexOnly, current: .claude, now: now) == .codex,
+          "面板收起时 Codex 还在 10 分钟内：马上切过去，即使没有额度读数（floating/close-reconciles）")
+    check(ActiveService.target(enabled: false, paused: false, manualAt: nil, lastActive: codexOnly, current: .claude, now: now) == nil
+          && ActiveService.target(enabled: true, paused: false, manualAt: nil, lastActive: codexOnly, current: .claude, now: now) == .codex,
+          "关着开关不切，重新打开时按现在的状态切（toggle/）")
+    let both: [OfficialQuotaEntry: Date] = [.claude: now - 3 * minute, .codex: now - 2 * minute]
+    check(ActiveService.target(enabled: true, paused: false, manualAt: nil, lastActive: both, current: .claude, now: now) == .codex,
+          "两家都在用：跟最近有动静的 Codex，不看哪家更紧")
+    check(ActiveService.target(enabled: true, paused: false, manualAt: now - 5 * minute, lastActive: codexOnly, current: .claude, now: now) == nil,
+          "手动选择的 10 分钟保护照旧")
+    check(ActiveService.target(enabled: true, paused: false, manualAt: nil, lastActive: codexOnly, current: .codex, now: now) == nil,
+          "已经是这家就不动")
 }
 
 
