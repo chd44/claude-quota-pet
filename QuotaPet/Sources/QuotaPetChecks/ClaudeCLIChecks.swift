@@ -243,6 +243,7 @@ func checkActiveServiceFollow() {
     checkRound3Follow()
     checkRound4Follow()
     checkAgyTranscript()
+    checkReviewFixes()
 }
 
 /// 第四轮：新会话按出生时间算、长任务不过期、自己查询的时间窗、Codex 子代理和旧格式、history 进重扫、删除和基线的交错（数据都是编的）
@@ -511,4 +512,44 @@ func checkAgyTranscript() {
     check(reader.read(file.path, now: base + 50, window: 600) == nil, "时间在未来的不算")
     let fresh = AgyTranscriptReader()
     check(fresh.read(file.path, now: base + 120, window: 600) == base + 100, "晚接上（第一次见到）：末尾一段里 window 以内的用户消息补回来")
+}
+
+/// PR #12 评审意见的两处：步骤记录第一次读到半行、整个 Claude 项目目录移进来（真实临时文件）
+func checkReviewFixes() {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("quotapet-review-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    // 1. 用户消息那一行第一次读时只写了一半：写完以后要能读到
+    let file = dir.appendingPathComponent("transcript.jsonl")
+    let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970).rounded(.down))
+    let stamp = ISO8601DateFormatter().string(from: now - 5)
+    let line = #"{"step_index":3,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"\#(stamp)","content":"hello"}"# + "\n"
+    let head = String(line.prefix(40)), tail = String(line.dropFirst(40))
+    try! (#"{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"\#(stamp)","content":"ok"}"# + "\n" + head)
+        .write(to: file, atomically: false, encoding: .utf8)
+    let reader = AgyTranscriptReader()
+    check(reader.read(file.path, now: now, window: 600) == nil, "第一次读到半行用户消息：先不算")
+    let h = try! FileHandle(forWritingTo: file); h.seekToEndOfFile(); h.write(Data(tail.utf8)); try! h.close()
+    check(reader.read(file.path, now: now, window: 600) == now - 5, "那一行写完以后读到整行，算这次用户消息（PR #12 评审 P2）")
+
+    // 2. 整个 Claude 项目目录移进 ~/.claude/projects：核对里面最近的会话
+    let home = dir.appendingPathComponent("home")
+    let projects = home.appendingPathComponent(".claude/projects")
+    try! fm.createDirectory(at: projects, withIntermediateDirectories: true)
+    let staged = dir.appendingPathComponent("staged-project")
+    try! fm.createDirectory(at: staged, withIntermediateDirectories: true)
+    try! Data("{}\n".utf8).write(to: staged.appendingPathComponent("s.jsonl"))
+    let ledger = ActivityLedger(source: .claude(home: home, ownFolder: "own"), window: 600)
+    _ = ledger.reconcile(now: Date())
+    let moved = projects.appendingPathComponent("-Users-someone-moved")
+    try! fm.moveItem(at: staged, to: moved)
+    check(ledger.observe([FileEvent(path: moved.path, flags: [.itemRenamed, .itemIsDir])], now: Date()) != nil,
+          "整个项目目录移进 projects：核对里面最近的会话（PR #12 评审 P2）")
+    let own = dir.appendingPathComponent("own-staged")
+    try! fm.createDirectory(at: own, withIntermediateDirectories: true)
+    try! Data("{}\n".utf8).write(to: own.appendingPathComponent("s.jsonl"))
+    try! fm.moveItem(at: own, to: projects.appendingPathComponent("own"))
+    check(ledger.observe([FileEvent(path: projects.appendingPathComponent("own").path, flags: [.itemRenamed, .itemIsDir])], now: Date()) == nil,
+          "QuotaPet 自己查额度的专用目录移进来：不算")
 }

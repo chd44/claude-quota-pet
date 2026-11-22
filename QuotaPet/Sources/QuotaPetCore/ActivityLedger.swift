@@ -260,13 +260,17 @@ public final class ActivityLedger: @unchecked Sendable {
         var files: [FileEvent] = [], trees: [URL] = [], full = false
         for event in events {
             if event.flags.needsRescan { full = true; continue }
-            guard source.isSessionFile(event.path) else { continue }
+            // 先看是不是会话目录里的子目录（新建或整个移进来）：Claude 的会话文件要求 .jsonl 结尾，目录本身过不了那一关。
+            // 子目录里的文件在核对时再按会话文件筛（QuotaPet 自己的专用目录、隐藏文件照样排除）
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: event.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                trees.append(URL(fileURLWithPath: event.path, isDirectory: true))
-            } else {
-                files.append(event)
+                if source.scanDirectories.contains(where: { isPath(event.path, inside: $0) }) {
+                    trees.append(URL(fileURLWithPath: event.path, isDirectory: true))
+                }
+                continue
             }
+            guard source.isSessionFile(event.path) else { continue }
+            files.append(event)
         }
         return (files, trees, full)
     }
@@ -521,21 +525,24 @@ public final class AgyTranscriptReader: @unchecked Sendable {
             if latest.map({ time > $0 }) ?? true { latest = time }
         }
         if cursors[path] == nil {
-            // 第一次见到：只看末尾一段，从第一个完整行开始；之后从末尾接着读
+            // 第一次见到：只看末尾一段，从第一个完整行开始；游标停在最后一个完整行之后，
+            // 还没写完的那一行留给下次读（不然写完时只读到后半截，这条用户消息就漏了）
             let total = size.uint64Value
             let start = total > UInt64(Self.tailCheck) ? total - UInt64(Self.tailCheck) : 0
+            var resume = start
             if let handle = try? FileHandle(forReadingFrom: url) {
                 defer { try? handle.close() }
-                if (try? handle.seek(toOffset: start)) != nil, var data = try? handle.read(upToCount: Int(total - start)) {
-                    if start > 0, let newline = data.firstIndex(of: 0x0A) { data = Data(data[data.index(after: newline)...]) }
+                if (try? handle.seek(toOffset: start)) != nil, let data = try? handle.read(upToCount: Int(total - start)) {
                     var lineStart = data.startIndex
+                    if start > 0, let newline = data.firstIndex(of: 0x0A) { lineStart = data.index(after: newline) }
                     while let newline = data[lineStart...].firstIndex(of: 0x0A) {
                         take(Data(data[lineStart..<newline]))
                         lineStart = data.index(after: newline)
                     }
+                    resume = start + UInt64(data.distance(from: data.startIndex, to: lineStart))
                 }
             }
-            cursors[path] = LineCursor(offset: total, identityOf: url)
+            cursors[path] = LineCursor(offset: resume, identityOf: url)
             return latest
         }
         var cursor = cursors[path]!
