@@ -192,6 +192,8 @@ public struct UsageSnapshot: Equatable, Sendable {
     public var today: ActivitySummary?
     /// 最近一次在本机用它是什么时候，不知道时为 nil（宠物看它判断是不是闲着）
     public var lastActiveAt: Date?
+    /// 最近一次「用户主动开始用它」的时间（比如 Codex 新一轮对话开始的记录）；分不出来时为 nil。自动跟随用它分辨主动使用和后台写入
+    public var lastStartAt: Date?
     /// 给用户看的数据说明 / 警告
     public var notes: [String]
     /// 一点数据都没有时为 false（宠物会显示疑惑）

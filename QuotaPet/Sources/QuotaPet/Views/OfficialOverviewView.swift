@@ -283,7 +283,7 @@ struct OfficialOverviewView: View {
             }
             if codexStale(now), let readAt = snapshot.officialAt {
                 return Headline(title: tr("读数是\(Fmt.ago(readAt, now: now))的", "Reading from \(Fmt.ago(readAt, now: now))"), color: .secondary,
-                                detail: tr("在本机用一次 Codex 就会更新", "Use Codex on this Mac to update it"))
+                                detail: tr("本机 Codex 下次记下总额度时更新", "Updates when Codex on this Mac next records the overall quota"))
             }
             // 和旧面板一样：先说最有用的一条（用完了、照这个速度何时见底、比平均节奏快…），再是她的一句话
             let status = PetStatus.of(snapshot, now: now, lateNight: false)

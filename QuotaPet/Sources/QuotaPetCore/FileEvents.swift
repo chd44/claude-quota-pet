@@ -13,6 +13,16 @@ public struct FileEventFlags: OptionSet, Sendable {
     public static let kernelDropped = FileEventFlags(rawValue: 0x4)
     /// 被监听的目录本身被移走、改名或删了
     public static let rootChanged = FileEventFlags(rawValue: 0x20)
+    /// 文件级事件（FileEvents 模式）：新建、删除、改名、内容改了
+    public static let itemCreated = FileEventFlags(rawValue: 0x100)
+    public static let itemRemoved = FileEventFlags(rawValue: 0x200)
+    public static let itemRenamed = FileEventFlags(rawValue: 0x800)
+    public static let itemInodeMetaMod = FileEventFlags(rawValue: 0x400)
+    public static let itemModified = FileEventFlags(rawValue: 0x1000)
+    public static let itemXattrMod = FileEventFlags(rawValue: 0x8000)
+    public static let itemIsFile = FileEventFlags(rawValue: 0x10000)
+    public static let itemIsDir = FileEventFlags(rawValue: 0x20000)
+    public static let itemIsSymlink = FileEventFlags(rawValue: 0x40000)
 
     /// 不知道具体哪个文件变了，要把这个路径下的东西全当成可能变了
     public var needsRescan: Bool {
@@ -51,4 +61,25 @@ public enum WatchRouting {
         }
         return ids
     }
+}
+
+/// 路径统一写法：去掉 ..、多余的斜杠，/private/var 和 /var 当成同一个（FSEvents 给的是真实路径）
+public func comparablePath(_ path: String) -> String {
+    let standard = URL(fileURLWithPath: path).standardizedFileURL.path
+    return standard.hasPrefix("/private/") ? String(standard.dropFirst("/private".count)) : standard
+}
+
+/// path 在 directory 里面（不含目录本身）。directory 是符号链接时，解析后的写法也认
+public func isPath(_ path: String, inside directory: URL) -> Bool {
+    relativePath(path, inside: directory) != nil
+}
+
+/// path 在 directory 里面时，返回它相对 directory 的那一段（不含目录本身）；不在里面时 nil。directory 是符号链接时，解析后的写法也认
+public func relativePath(_ path: String, inside directory: URL) -> String? {
+    let target = comparablePath(path)
+    for base in [directory.path, directory.resolvingSymlinksInPath().path] {
+        let prefix = comparablePath(base) + "/"
+        if target.hasPrefix(prefix), target.count > prefix.count { return String(target.dropFirst(prefix.count)) }
+    }
+    return nil
 }

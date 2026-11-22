@@ -24,6 +24,10 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
     /// 最近 25 小时的读数，只在内存里（算按官方读数的消耗速度用）
     private(set) var history: [Reading] = []
     private(set) var querying = false
+    /// 最近一次查询结束（不论成败）的时间：自动跟随用它认出 QuotaPet 自己查额度时 CLI 留下的写入
+    private(set) var lastQueryEnded: Date?
+    /// 最近一次查询开始的时间：和 lastQueryEnded 一起框出 CLI 进程在跑的那段时间
+    private(set) var lastQueryStarted: Date?
     var onChange: (() -> Void)?
     private let enabled: Bool
     private let probe: @Sendable () async -> Reading
@@ -156,12 +160,14 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
 
     private func startQuery() {
         querying = true
+        lastQueryStarted = Date()
         let requestGeneration = generation
         let probe = self.probe
         onChange?()
         task = Task { [weak self] in
             let result = await probe()
             guard let self else { return }
+            self.lastQueryEnded = Date()
             self.policy.finish()
             self.task = nil
             if requestGeneration == self.generation, self.policy.selected, !self.policy.sleeping {

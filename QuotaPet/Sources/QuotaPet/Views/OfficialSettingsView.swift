@@ -41,8 +41,8 @@ struct OfficialSettingsView: View {
 
             SettingsGroup(tr("菜单栏", "Menu Bar")) {
                 SwitchRow(tr("自动跟随正在用的那家", "Follow the service in use"),
-                          subtitle: tr("Claude Code、Codex 或 agy 一有动静，菜单栏和面板就切到那家；几家同时在用时显示用得最紧的。手动选了之后 10 分钟内不自动切换。",
-                                       "When Claude Code, Codex or agy is active, the menu bar and panel switch to it; with several in use, the most constrained one is shown. A manual choice holds for 10 minutes."),
+                          subtitle: tr("Claude Code、Codex 或 agy 一有动静，菜单栏和面板就切到那家；几家同时在用时跟你最近主动发起操作的那家，后台回复抢不走。手动选了之后 10 分钟内不自动切换。",
+                                       "When Claude Code, Codex or agy is active, the menu bar and panel switch to it; with several in use, it follows the one you most recently started something in; background replies don’t take it back. A manual choice holds for 10 minutes."),
                           isOn: $settings.autoFollowActive)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(tr("宠物旁边显示", "Next to the pet")).font(.system(size: 12))
