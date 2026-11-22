@@ -53,6 +53,29 @@ public enum ClaudeCLIScreen: Equatable, Sendable {
     case usageReady
     case unknown
 
+    /// CLI 一启动就退出、屏幕上说不认 --session-id（旧版本）：查询要靠这个参数确认会话归属，不能退回去猜
+    public static func rejectsSessionID(_ terminal: VirtualTerminal) -> Bool {
+        let lower = terminal.normalizedText.lowercased()
+        return lower.contains("--session-id")
+            && ["unknown option", "unrecognized option", "unknown argument", "unexpected argument", "error"].contains { lower.contains($0) }
+    }
+
+    static let loginMarkers = ["select login method", "not logged in", "please run /login", "oauth token has expired", "invalid api key"]
+
+    /// 屏幕上最后出现的是明确的登录提示（在任何「% used」那一行之后，或者根本没有额度文字）：
+    /// 旧额度面板的残留文字还在屏幕上时，CLI 最后说的「Not logged in」才是现在的状态
+    public static func showsFinalLogin(_ terminal: VirtualTerminal) -> Bool {
+        let lines = terminal.normalizedText.lowercased().components(separatedBy: "\n")
+        guard let login = lines.lastIndex(where: { line in loginMarkers.contains { line.contains($0) } }) else { return false }
+        guard let usage = lines.lastIndex(where: { $0.contains("% used") }) else { return true }
+        return login > usage
+    }
+
+    /// CLI 已经退出时最后的画面算什么：最后出现的是登录提示就是登录，其余同 classify
+    public static func finalScreen(_ terminal: VirtualTerminal) -> ClaudeCLIScreen {
+        showsFinalLogin(terminal) ? .login : classify(terminal)
+    }
+
     public static func classify(_ terminal: VirtualTerminal) -> ClaudeCLIScreen {
         let text = terminal.normalizedText
         let lower = text.lowercased()
@@ -60,10 +83,7 @@ public enum ClaudeCLIScreen: Equatable, Sendable {
         if lower.contains("% used") {
             return lower.contains("refreshing") || lower.contains("loading") ? .usageLoading : .usageReady
         }
-        if lower.contains("select login method") || lower.contains("not logged in") || lower.contains("please run /login")
-            || lower.contains("oauth token has expired") || lower.contains("invalid api key") {
-            return .login
-        }
+        if loginMarkers.contains(where: { lower.contains($0) }) { return .login }
         if lower.contains("trust this folder") {
             let yes = lines.contains { $0.hasPrefix("❯") && $0.lowercased().contains("yes, i trust this folder") }
             return .trust(yesSelected: yes)

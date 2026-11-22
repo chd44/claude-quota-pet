@@ -62,18 +62,27 @@ struct LineCursor {
         identity = nil
     }
 
+    /// 这个路径现在还是游标认得的那个文件（同一个 inode、开头内容没变）；还没记身份时当作是
+    func matches(_ url: URL) -> Bool {
+        guard let known = identity else { return true }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        return FileIdentity.of(handle, headLength: UInt64(known.headLength)) == known
+    }
+
     /// size：文件现在的大小。文件变小了（被截断或重写），或者换成了另一个文件，就从头读。
     /// 分块读，每块读完马上释放：扫描是后台队列上的一个任务，不包 autoreleasepool 的话，
     /// 读过的块要等整个任务结束才一起释放，第一次扫几百 MB 日志时内存会跟着涨
-    mutating func readAppended(from url: URL, size: UInt64, onLine: (Data) -> Void) {
+    /// onReset：认出文件被换掉（或截短）、要从头读时先调用，调用方据此丢掉旧文件的状态
+    mutating func readAppended(from url: URL, size: UInt64, onReset: (() -> Void)? = nil, onLine: (Data) -> Void) {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return }
         defer { try? handle.close() }
         // 先认文件：身份记着的话，按记着的长度重算开头指纹，对不上就是换了
         if let known = identity {
             let current = FileIdentity.of(handle, headLength: UInt64(known.headLength))
-            if current != known { reset() }
+            if current != known { reset(); onReset?() }
         }
-        if size < offset { reset() }
+        if size < offset { reset(); onReset?() }
         guard size > offset else { return }
         guard (try? handle.seek(toOffset: offset)) != nil else { return }
         var more = true

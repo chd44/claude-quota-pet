@@ -50,8 +50,13 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
                   "The last overall Codex quota reading was \(ago). Usage from the web or cloud tasks (such as Dots) shows up the next time Codex on this Mac records the overall quota in its logs.")
     }
 
-    public init(home: URL = CodexLogScanner.defaultHome) {
-        scanner = CodexLogScanner(home: home)
+    /// rejected：已经判定无效的未来记录（App 里存在本机设置，重启后仍不读回来）
+    private let clock: () -> Date
+
+    public init(home: URL = CodexLogScanner.defaultHome, rejected: CodexRejectedRecords = CodexRejectedRecords(),
+                clock: @escaping () -> Date = { Date() }) {
+        scanner = CodexLogScanner(home: home, rejected: rejected, clock: clock)
+        self.clock = clock
     }
 
     public var watchPaths: [String] { scanner.directories.map(\.path) }
@@ -60,10 +65,13 @@ public final class CodexProvider: UsageProvider, @unchecked Sendable {
 
     public func snapshot(now: Date) throws -> UsageSnapshot {
         // 时间戳在未来的读数（时钟偏差）还不算数，等时间追上了再参与（扫描器里留着）
+        let before = clock()
         let all = scanner.refresh(now: now).filter { $0.time <= now }
+        // 判「在未来」时把这次读日志花的时间算上：读的过程中才写进来的记录（读到时已经合法）不能刚读进来就被当成未来永久丢掉
+        let asOf = now.addingTimeInterval(max(0, clock().timeIntervalSince(before)))
         // 最近一次在本机用 Codex：任何 token_count 事件都算，不管有没有带总额度（自动跟随、宠物的「闲了多久」用它）
-        let activeAt = scanner.lastActivity(asOf: now)
-        let startAt = scanner.lastStart(asOf: now)
+        let activeAt = scanner.lastActivity(asOf: asOf)
+        let startAt = scanner.lastStart(asOf: asOf)
         // 只看 Codex 的总额度：个别模型自己的额度不能顶替它（那会把某个模型的百分比当成总额度）
         let readings = all.filter(\.isMain)
         lastReadings = readings
