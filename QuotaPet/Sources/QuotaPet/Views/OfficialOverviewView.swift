@@ -501,6 +501,8 @@ struct OfficialTabs: View {
     @State private var pending: OfficialQuotaEntry?
     /// 上一次是拖完松手（落位带一点回弹）还是点一下（干脆落位）
     @State private var dropped = false
+    /// 键盘焦点在哪一格（开了「全键盘控制」才会有）
+    @FocusState private var focused: OfficialQuotaEntry?
 
     private static let space = "OfficialTabs"
 
@@ -645,6 +647,16 @@ struct OfficialTabs: View {
                     Color.clear.preference(key: TabFramesKey.self, value: [entry: proxy.frame(in: .named(Self.space))])
                 })
                 .help(tr("看 \(entry.serviceName) 的额度", "Show \(entry.serviceName) usage"))
+                // 开了「全键盘控制」时每格能用 Tab 选到（和按钮一样，平时不抢焦点）：空格 / 回车切过去，左右方向键换到相邻那家。
+                // 系统的方形焦点框换成贴合胶囊的描边
+                .focusable(interactions: .activate)
+                .focused($focused, equals: entry)
+                .focusEffectDisabled()
+                .overlay(Capsule().strokeBorder(Color.accentColor, lineWidth: 2).padding(1).opacity(focused == entry ? 1 : 0))
+                .onKeyPress(.space) { choose(entry) }
+                .onKeyPress(.return) { choose(entry) }
+                .onKeyPress(.leftArrow) { step(-1, from: entry) }
+                .onKeyPress(.rightArrow) { step(1, from: entry) }
                 // 手势挂在整条上，读屏时每格仍是一个能按的按钮
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(entry.serviceName)
@@ -654,6 +666,21 @@ struct OfficialTabs: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: target)
+    }
+
+    private func choose(_ entry: OfficialQuotaEntry) -> KeyPress.Result {
+        dropped = false
+        pending = entry
+        if entry != selected { onSelect(entry) }
+        return .handled
+    }
+
+    /// 方向键：焦点和选中一起挪到相邻那家；到头了就停在原地
+    private func step(_ by: Int, from entry: OfficialQuotaEntry) -> KeyPress.Result {
+        let all = OfficialQuotaEntry.allCases
+        guard let index = all.firstIndex(of: entry), all.indices.contains(index + by) else { return .handled }
+        focused = all[index + by]
+        return choose(all[index + by])
     }
 
     static func tint(_ entry: OfficialQuotaEntry) -> Color {
