@@ -17,13 +17,13 @@ QuotaPet 启动后立即通过官方 CLI 的交互式 `/usage` 读取 agy 和 Cl
 
 0.4.2（build 15）在 `Resources/Pets/agy` 下包含三款的六张中性 PNG：默认棱镜礼装（Prism Regalia）的 `menu.png` / `panel.png`，反重力飞行员（Zero-G Pilot）的 `pilot-menu.png` / `pilot-panel.png`，绣球花匠（Hydrangea Gardener）的 `gardener-menu.png` / `gardener-panel.png`。每组分别用于菜单栏头像和额度面板半身像。图片在本地加载；有效 agy 真实读数可切换额度状态。切换官方入口时更新，Claude 和 Codex 各自记住选过的形象，切回 agy 也恢复上次 agy 款式。agy 形象参考 ZipZipPipe 的「Gemini 娘」。[角色原设](https://www.bilibili.com/opus/1233069202138464289)
 
-agy 的额度以 Gemini 组为准（`AgyQuotaPresentation.primaryWindow`：这组里用得最多的窗口），菜单栏数字、切换条和宠物表情都用它；面板里仍列出全部模型组。补充状态图（刚恢复、歇着、有点慌、有点懵、醒过来中、被戳、闹别扭）和需要重画的「元气满满」「快撑不住」见 [design/agy-states](../design/agy-states/README.md)，用 `scripts/import-agy-art.sh` 导入；缺图或登记过的坏图（`OfficialPetChoice.brokenArtDigests`）退回这款的基础图。
+agy 的额度以 Gemini 组为准（`AgyQuotaPresentation.primaryWindow`：这组里用得最多的窗口），菜单栏数字、切换条和宠物表情都用它，面板标题写明是哪个窗口（窗口行上不再另加「菜单栏显示」标签）；面板里仍列出全部模型组。补充状态图（刚恢复、歇着、有点慌、有点懵、醒过来中、被戳、闹别扭）和需要重画的「元气满满」「快撑不住」见 [design/agy-states](../design/agy-states/README.md)，用 `scripts/import-agy-art.sh` 导入；缺图或登记过的坏图（`OfficialPetChoice.brokenArtDigests`）退回这款的基础图。
 
 `scripts/agy-asset-names.sh` 是打包、归档检查与 CI fixture 共用的唯一清单：三款前缀（空、`pilot-`、`gardener-`）× `menu` / `panel` × 中性或 `energetic` / `tired` / `exhausted` / `sleeping` 后缀，共 30 张必需 PNG；`--optional` 列出 42 张可补充的状态图，有就打包，没有不报错。例如 `pilot-menu-tired.png`。`build-app.sh` 按共享清单显式复制至 App 的 `Contents/Resources/Pets/agy/`，不复制参考图或其他中间产物。`check-release-archive.sh` 在解压后的最终 zip 中检查 30 图存在且格式为 PNG，agy 目录拒绝其他文件，旧形象的 portrait/icon 文件规则保留。发包时还需核对源图与包内图的 SHA-256 一致，并在图形会话查看三款菜单栏和面板实际显示，以及切换服务后是否恢复所选款式。此处版本与图形验收不代表已发布。
 
 ## 启动方式
 
-正常模式由 `OfficialMenuController` 管理：左键弹出 `OfficialOverviewView`（沿用旧总览的布局与 `UsageBar` 进度条），右键弹出操作菜单；图标不可见时 `reveal()` 改用当前屏幕的浮动面板。可用 `swift run QuotaPet --render-official-previews <dir>` 渲染合成读数的面板预览。桌面联动在「宠物菜单 → 启动方式」主动开启，需要时由用户在系统登录项中批准后台助手；成功启用新方式后会关闭旧登录项，待批准时可单独关闭旧选项。
+正常模式由 `OfficialMenuController` 管理：左键弹出 `OfficialOverviewView`（沿用旧总览的布局与 `UsageBar` 进度条），右键弹出操作菜单；图标不可见时 `reveal()` 改用当前屏幕的浮动面板。面板切换条 `OfficialTabs` 整条只有一颗胶囊：点击直接落位，拖动时按磁吸曲线跟手、过交界轻震，松手停在最近的那家。三家共用 `RefreshButton`（点了至少转一圈，读取中一直转）；点刷新的结果由 `RefreshNotice`（QuotaPetCore）判定，在页脚停 4 秒：Claude / agy 要点击之后读到可用读数才算已刷新，30 秒内重复点会提示还要等几秒，Codex 报日志里读数的时间。可用 `swift run QuotaPet --render-official-previews <dir>` 渲染合成读数的面板预览。桌面联动在「宠物菜单 → 启动方式」主动开启，需要时由用户在系统登录项中批准后台助手；成功启用新方式后会关闭旧登录项，待批准时可单独关闭旧选项。
 
 `QuotaPetLauncher` 等待 `NSWorkspace` 进程事件，不循环扫描，不读取额度。只有桌面自动带起的会话随最后一个 Claude/Codex 桌面端关闭；手动或 CLI 唤起后保留运行。退出会暂停桌面自动带起，直到下次手动/CLI 激活。启用与暂停是不同状态。
 
