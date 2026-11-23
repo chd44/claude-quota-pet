@@ -512,15 +512,18 @@ struct OfficialTabs: View {
         if #available(macOS 26.0, *) {
             GlassEffectContainer(spacing: 4) {
                 track {
-                    // 选中态：不带颜色的明亮玻璃（带主题色在暗色下会发褐）；浅色下用实白加柔和阴影，才和轨道分得开
+                    // 选中态：不带颜色的明亮玻璃（带主题色在暗色下会发褐）；浅色下用实白加柔和阴影，才和轨道分得开。
+                    // 暗色下玻璃会透出面板后面的东西，后面是亮色地图、网页时轨道和胶囊一样亮：
+                    // 胶囊提亮并加一圈亮边，轨道垫一层深色底，不靠背景也分得开
                     Capsule()
-                        .fill(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.95))
-                        .shadow(color: .black.opacity(colorScheme == .dark ? 0 : 0.14), radius: 2, y: 1)
+                        .fill(Color.white.opacity(colorScheme == .dark ? 0.22 : 0.95))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.35 : 0), lineWidth: 0.75))
+                        .shadow(color: .black.opacity(colorScheme == .dark ? 0.35 : 0.14), radius: 2, y: 1)
                         .glassEffect(.regular, in: .capsule)
                 }
                 .padding(3)
-                // 浅色背景上玻璃轨道几乎看不出来：加一层很淡的深色底和细描边
-                .background(Capsule().fill(Color.black.opacity(colorScheme == .dark ? 0 : 0.07)))
+                // 浅色背景上玻璃轨道几乎看不出来：加一层很淡的深色底和细描边；暗色下深色底更重，压住透进来的亮背景
+                .background(Capsule().fill(Color.black.opacity(colorScheme == .dark ? 0.32 : 0.07)))
                 .overlay(Capsule().strokeBorder(Color.black.opacity(colorScheme == .dark ? 0 : 0.08), lineWidth: 0.5))
                 .glassEffect(.regular, in: .capsule)
             }
@@ -536,12 +539,13 @@ struct OfficialTabs: View {
     private var materialBar: some View {
         track {
             Capsule()
-                .fill(colorScheme == .dark ? Color.white.opacity(0.16) : Color.white)
-                .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+                .fill(colorScheme == .dark ? Color.white.opacity(0.22) : Color.white)
+                .overlay(Capsule().strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.35 : 0), lineWidth: 0.75))
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.35 : 0.12), radius: 2, y: 1)
         }
         .padding(4)
         .background(Capsule().fill(.ultraThinMaterial))
-        .background(Capsule().fill(Color.black.opacity(colorScheme == .dark ? 0 : 0.06)))
+        .background(Capsule().fill(Color.black.opacity(colorScheme == .dark ? 0.32 : 0.06)))
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
     }
 
