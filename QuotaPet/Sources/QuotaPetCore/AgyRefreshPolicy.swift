@@ -29,6 +29,14 @@ public struct AgyRefreshPolicy: Sendable {
     /// 手动刷新的最短间隔：连点不会反复启动官方 CLI
     public static let manualGap: TimeInterval = 30
 
+    /// 手动刷新还要等几秒（离上次开始读不到 manualGap 时）；不用等时是 nil
+    public func manualWait(now: Date) -> TimeInterval? {
+        guard let lastAttempt else { return nil }
+        let since = now.timeIntervalSince(lastAttempt)
+        guard since >= 0, since < Self.manualGap else { return nil }
+        return Self.manualGap - since
+    }
+
     /// 用户点了刷新：不等 15 分钟，但离上次开始读至少 manualGap，且不和正在进行的读取并发
     public mutating func beginManual(now: Date) -> Bool {
         guard selected, !sleeping, !inFlight else { return false }

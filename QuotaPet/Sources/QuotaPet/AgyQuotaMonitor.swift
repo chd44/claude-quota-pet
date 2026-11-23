@@ -7,6 +7,8 @@ protocol TimedReading: Codable, Sendable {
     var checkedAt: Date { get }
     /// 读到了可用的额度（只缓存这种）
     var isUsable: Bool { get }
+    /// 读不到时官方 CLI 给的原因（可能为空）
+    var message: String { get }
 }
 
 extension AgyQuotaReading: TimedReading {
@@ -141,6 +143,9 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
         guard policy.begin(now: Date()) else { return }
         startQuery()
     }
+
+    /// 手动刷新还要等几秒；不用等时是 nil
+    func manualWait(now: Date = Date()) -> TimeInterval? { policy.manualWait(now: now) }
 
     /// 用户点了刷新：马上读一次（离上次开始读不到 30 秒、或正在读时不重复启动）。返回是否真的开始读了
     @discardableResult

@@ -23,6 +23,8 @@ final class OfficialPanelState: ObservableObject {
     @Published var agyStatus = ""
     @Published var runningApps: Set<String> = []
     @Published var maxHeight: CGFloat = .infinity
+    /// 点了刷新后在页脚停几秒的结果提示
+    @Published var refreshNotice: RefreshNotice?
     /// 戳宠物的台词和连戳次数；从随机的一句开始
     var chat = PetChat(pick: .random(in: 0..<6))
 }
@@ -58,6 +60,7 @@ struct OfficialPanelRoot: View {
                                      onSelect: onSelect, onOpenOfficial: onOpenOfficial, onOpenAntigravity: onOpenAntigravity,
                                      refreshing: entry == .claude ? state.claudeQuerying : entry == .antigravity ? state.querying : false,
                                      onRefresh: { onRefresh(entry) },
+                                     refreshNotice: state.refreshNotice,
                                      onMenu: { state.page = .settings }, onQuit: onQuit,
                                      pokeArtwork: pokeArtwork,
                                      onPoke: { mood in state.chat.poke(mood: mood, now: Date()) },
@@ -380,6 +383,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         state.agyHistory = agyMonitor.history
         state.querying = agyMonitor.querying
         state.agyStatus = agyMonitor.summary
+        finishRefresh(.antigravity, agyMonitor)
         updateUsage()
     }
 
@@ -613,6 +617,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
             }
         }
         claudeActivity.recheckPendingStarts()  // 查询结束了：挂起的提示词写入现在能判是不是自己的
+        finishRefresh(.claude, claudeMonitor)
         updateUsage()
     }
 
@@ -678,11 +683,45 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
     /// 刷新按钮：Claude / agy 马上用官方 CLI 重读（两次之间至少 30 秒），Codex 重读本机日志
     private func refresh(_ entry: OfficialQuotaEntry) {
         switch entry {
-        case .claude: claudeMonitor.refreshNow()
-        case .antigravity: agyMonitor.refreshNow()
-        case .codex: usageStore?.refreshNow()
+        case .claude: manualRefresh(.claude, claudeMonitor)
+        case .antigravity: manualRefresh(.antigravity, agyMonitor)
+        case .codex:
+            usageStore?.refreshNow()
+            // 重读本机日志在后台队列里很快做完（日志一写入本来也会更新）：等刷新按钮转完一圈再报现在的读数
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self else { return }
+                let snapshot = self.usageStore?.snapshot(for: .codex)
+                self.showNotice(.codexReloaded(officialAt: snapshot?.hasData == true ? snapshot?.officialAt : nil, now: Date()))
+            }
         }
         updateUsage()
+    }
+
+    /// 点了刷新、还没读完的几家，记的是点的时间：读完后据此判断这次有没有读到新读数
+    private var refreshRequests: [OfficialQuotaEntry: Date] = [:]
+
+    private func manualRefresh<R: TimedReading>(_ entry: OfficialQuotaEntry, _ monitor: CLIQuotaMonitor<R>) {
+        let now = Date()
+        if monitor.refreshNow() || monitor.querying {
+            refreshRequests[entry] = now  // 正好在自动读：这次读完也报结果
+        } else {
+            showNotice(.tooSoon(entry: entry, wait: monitor.manualWait(now: now), now: now))
+        }
+    }
+
+    /// 读完了：报这次点刷新的结果
+    private func finishRefresh<R: TimedReading>(_ entry: OfficialQuotaEntry, _ monitor: CLIQuotaMonitor<R>) {
+        guard let requested = refreshRequests[entry], !monitor.querying else { return }
+        refreshRequests[entry] = nil
+        showNotice(.cliFinished(entry: entry, usable: monitor.reading?.isUsable ?? false, checkedAt: monitor.reading?.checkedAt,
+                                requestedAt: requested, message: monitor.reading?.message ?? "", now: Date()))
+    }
+
+    private func showNotice(_ notice: RefreshNotice) {
+        state.refreshNotice = notice
+        DispatchQueue.main.asyncAfter(deadline: .now() + RefreshNotice.duration) { [weak self] in
+            if self?.state.refreshNotice == notice { self?.state.refreshNotice = nil }
+        }
     }
 
     @objc private func refreshCurrent(_ sender: NSMenuItem) {

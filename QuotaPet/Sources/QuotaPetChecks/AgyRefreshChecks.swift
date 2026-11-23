@@ -88,4 +88,24 @@ func agyResetChecks() {
     let lateReset = AgyQuotaReading(status: .available, remainingPercent: 0, groupName: "Gemini", checkedAt: now,
                                     resetsAt: now.addingTimeInterval(3_600))
     check(AgyQuotaPresentation(reading: lateReset, now: now).validUntil == now.addingTimeInterval(900), "重置较晚也不能延长15分钟有效期")
+
+    // 手动刷新的等待秒数和刷新结果提示
+    var gate = AgyRefreshPolicy()
+    gate.select(true)
+    check(gate.manualWait(now: now) == nil, "从没读过：手动刷新不用等")
+    check(gate.beginManual(now: now), "第一次手动刷新立即开始")
+    gate.finish()
+    check(gate.manualWait(now: now.addingTimeInterval(10)) == 20, "10 秒后再点：还要等 20 秒")
+    check(gate.manualWait(now: now.addingTimeInterval(30)) == nil, "满 30 秒：不用等")
+    check(gate.manualWait(now: now.addingTimeInterval(-5)) == nil, "时钟往回拨：不显示等待")
+    let asked = now.addingTimeInterval(-3)
+    check(RefreshNotice.cliFinished(entry: .claude, usable: true, checkedAt: now, requestedAt: asked, message: "", now: now).kind == .done,
+          "点刷新之后读到可用读数：已刷新")
+    check(RefreshNotice.cliFinished(entry: .claude, usable: true, checkedAt: asked.addingTimeInterval(-60), requestedAt: asked, message: "", now: now).kind == .failed,
+          "读数还是点刷新之前的：不算刷新成功")
+    let signIn = RefreshNotice.cliFinished(entry: .antigravity, usable: false, checkedAt: now, requestedAt: asked, message: "请先登录", now: now)
+    check(signIn.kind == .failed && signIn.text.contains("请先登录"), "读失败：提示带上 CLI 给的原因")
+    check(RefreshNotice.tooSoon(entry: .claude, wait: 19.2, now: now).text.contains("20"), "刚读过：等待秒数向上取整")
+    check(RefreshNotice.codexReloaded(officialAt: nil, now: now).kind == .failed, "Codex 日志里没有读数：没读到")
+    check(RefreshNotice.codexReloaded(officialAt: now.addingTimeInterval(-120), now: now).kind == .done, "Codex 有读数：已刷新")
 }

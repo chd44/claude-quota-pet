@@ -29,9 +29,10 @@ struct OfficialOverviewView: View {
     /// 这家正在读取（刷新按钮换成转圈）
     var refreshing = false
     var onRefresh: () -> Void = {}
+    /// 刚点完刷新的结果（成功、没读到、要等一会儿），在页脚停几秒
+    var refreshNotice: RefreshNotice?
     var onMenu: () -> Void = {}
     var onQuit: () -> Void = {}
-    @State private var refreshSpin = 0.0
     /// agy 被戳时的反应图（annoyed：连戳闹别扭）；还没补这张图时是 nil
     var pokeArtwork: (OfficialPetChoice, Bool) -> NSImage? = { _, _ in nil }
     @State private var agyPoke: Bool?
@@ -112,7 +113,7 @@ struct OfficialOverviewView: View {
                     agyLinks  // 没读数时才把官方入口摆出来；有读数时在页脚
                 } else {
                     VStack(spacing: 10) {
-                        ForEach(AgyGroup.of(agy.windows)) { AgyGroupCard(group: $0, primaryID: agy.primaryWindow?.id, now: now) }
+                        ForEach(AgyGroup.of(agy.windows)) { AgyGroupCard(group: $0, now: now) }
                     }
                 }
             case .claude, .codex:
@@ -222,15 +223,9 @@ struct OfficialOverviewView: View {
                     StatusBadge(text: badge(known: known != nil, mood: mood), tint: tint)
                     Spacer(minLength: 0)
                     HStack(spacing: 0) {
-                        if refreshing {
-                            ProgressView().controlSize(.small).frame(width: 26, height: 26)
-                                .help(tr("正在读取官方额度", "Reading official usage"))
-                        } else {
-                            IconButton(systemName: "arrow.clockwise", help: refreshHelp, rotation: refreshSpin) {
-                                onRefresh()
-                                withAnimation(.easeInOut(duration: 0.6)) { refreshSpin += 360 }
-                            }
-                        }
+                        // 三家同一个刷新按钮：点了至少转一圈，读取没结束就一直转，读完转完这一圈停下
+                        RefreshButton(busy: refreshing, help: refreshHelp, action: onRefresh)
+                            .id(entry)  // 换页签时各家从自己的状态开始，不接着上一家没转完的那圈
                         IconButton(systemName: "gearshape", help: tr("宠物形象、启动方式和更多", "Pet, startup and more"),
                                    action: onMenu)
                     }
@@ -342,11 +337,27 @@ struct OfficialOverviewView: View {
 
     private func footer(now: Date) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(sourceLine(now: now))
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .help(sourceHelp)
+            // 刚点过刷新：几秒内这里换成结果提示，之后回到「官方读数 · 几分钟前」
+            Group {
+                if let notice = refreshNotice, notice.entry == entry {
+                    Label(notice.text, systemImage: Self.noticeIcon(notice.kind))
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(Self.noticeColor(notice.kind))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(notice.text)
+                        .transition(.opacity.combined(with: .offset(y: 3)))
+                        .id(notice.at)
+                } else {
+                    Text(sourceLine(now: now))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .help(sourceHelp)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.22), value: refreshNotice)
             Spacer(minLength: 4)
             Button(tr("官方用量页", "Official page")) { onOpenOfficial(entry) }
                 .buttonStyle(.plain)
@@ -357,6 +368,22 @@ struct OfficialOverviewView: View {
                 .buttonStyle(.plain)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    static func noticeIcon(_ kind: RefreshNotice.Kind) -> String {
+        switch kind {
+        case .done: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.circle.fill"
+        case .tooSoon: return "clock.fill"
+        }
+    }
+
+    static func noticeColor(_ kind: RefreshNotice.Kind) -> Color {
+        switch kind {
+        case .done: return Color(nsColor: .systemGreen)
+        case .failed: return Color(nsColor: .systemOrange)
+        case .tooSoon: return .secondary
         }
     }
 
@@ -452,8 +479,10 @@ extension OfficialQuotaEntry {
     }
 }
 
-/// 三家服务的切换条：液态玻璃胶囊轨道，选中的那家是一颗带主题色的玻璃胶囊，切换时滑过去。
-/// 每格一行：迷你圆环（按百分比填色）+ 服务名 + 百分比。macOS 26 以下退回毛玻璃材质
+/// 三家服务的切换条：液态玻璃胶囊轨道，选中的那家是一颗明亮的玻璃胶囊。
+/// 和系统分段控件一样：点一下滑过去，也可以按住胶囊左右拖，松手停在离得最近的那家。
+/// 整条只有一颗胶囊（不在各格之间删了再建），切换时不会留下残影。
+/// 每格一行：小圆点 + 服务名 + 百分比。macOS 26 以下退回毛玻璃材质
 struct OfficialTabs: View {
     var selected: OfficialQuotaEntry
     /// 每家最紧张窗口的百分比；没有可靠的官方读数时没有
@@ -463,21 +492,29 @@ struct OfficialTabs: View {
     /// 正在用的几家（最近 10 分钟有动静）
     var active: Set<OfficialQuotaEntry> = []
     var onSelect: (OfficialQuotaEntry) -> Void
-    @Namespace private var selection
     @Environment(\.colorScheme) private var colorScheme
+    /// 各格在切换条里的位置（量出来的，名字长短不同时各格不一定一样宽）
+    @State private var frames: [OfficialQuotaEntry: CGRect] = [:]
+    /// 正在拖：胶囊中心跟着手指的横坐标
+    @State private var dragX: CGFloat?
+    /// 刚松手选中、外面还没换过来的那家：胶囊先停在这里，不弹回旧位置
+    @State private var pending: OfficialQuotaEntry?
+    /// 上一次是拖完松手（落位带一点回弹）还是点一下（干脆落位）
+    @State private var dropped = false
+
+    private static let space = "OfficialTabs"
 
     var body: some View {
         // 液态玻璃接口只在 macOS 26 SDK（Swift 6.2 起）里有；更旧的工具链（比如 CI）只编毛玻璃版本
         #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             GlassEffectContainer(spacing: 4) {
-                segments { _ in
+                track {
                     // 选中态：不带颜色的明亮玻璃（带主题色在暗色下会发褐）；浅色下用实白加柔和阴影，才和轨道分得开
                     Capsule()
                         .fill(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.95))
                         .shadow(color: .black.opacity(colorScheme == .dark ? 0 : 0.14), radius: 2, y: 1)
-                        .glassEffect(.regular.interactive(), in: .capsule)
-                        .matchedGeometryEffect(id: "selected", in: selection)
+                        .glassEffect(.regular, in: .capsule)
                 }
                 .padding(3)
                 // 浅色背景上玻璃轨道几乎看不出来：加一层很淡的深色底和细描边
@@ -495,11 +532,10 @@ struct OfficialTabs: View {
 
     /// macOS 26 以前：毛玻璃轨道 + 白色胶囊
     private var materialBar: some View {
-        segments { _ in
+        track {
             Capsule()
                 .fill(colorScheme == .dark ? Color.white.opacity(0.16) : Color.white)
                 .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
-                .matchedGeometryEffect(id: "selected", in: selection)
         }
         .padding(4)
         .background(Capsule().fill(.ultraThinMaterial))
@@ -507,15 +543,85 @@ struct OfficialTabs: View {
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
     }
 
-    private func segments<Pill: View>(@ViewBuilder pill: @escaping (OfficialQuotaEntry) -> Pill) -> some View {
+    /// 胶囊现在该停的那家：拖动中是手指下面那格，否则是选中的那家
+    private var target: OfficialQuotaEntry { dragX.map { Self.nearest($0, in: frames) ?? selected } ?? pending ?? selected }
+
+    static func nearest(_ x: CGFloat, in frames: [OfficialQuotaEntry: CGRect]) -> OfficialQuotaEntry? {
+        guard !frames.isEmpty else { return nil }
+        return OfficialQuotaEntry.allCases.min { abs((frames[$0]?.midX ?? .infinity) - x) < abs((frames[$1]?.midX ?? .infinity) - x) }
+    }
+
+    /// 拖动时胶囊中心的位置：带磁吸。手指在某格中间一带时胶囊几乎吸在这格正中，
+    /// 越靠近两格交界跟得越快，过了交界就被下一格吸过去——拖起来有一格一格卡上的手感。
+    /// 交界两边连续（左格右边缘 = 右格左边缘），不会跳；两头不超出第一格和最后一格的中心
+    static func magnetized(_ x: CGFloat, in frames: [OfficialQuotaEntry: CGRect]) -> CGFloat? {
+        guard let at = nearest(x, in: frames), let rest = frames[at],
+              let first = frames[OfficialQuotaEntry.allCases.first!], let last = frames[OfficialQuotaEntry.allCases.last!] else { return nil }
+        let half = max(rest.width / 2, 1)
+        let t = min(max((x - rest.midX) / half, -1), 1)
+        let pulled = rest.midX + (t < 0 ? -1 : 1) * pow(abs(t), 2.4) * half
+        return min(max(pulled, first.midX), last.midX)
+    }
+
+    /// 胶囊的位置和宽度：拖动时按磁吸后的位置，宽度取手指下那格的；否则停在选中的那格。
+    /// 各格位置在同一次布局里传进来（渲染预览图时没有第二次布局，不能等 @State 回写）
+    private func pillRect(_ frames: [OfficialQuotaEntry: CGRect]) -> CGRect? {
+        let at = dragX.flatMap { Self.nearest($0, in: frames) } ?? pending ?? selected
+        guard let rest = frames[at] else { return nil }
+        guard let dragX, let mid = Self.magnetized(dragX, in: frames) else { return rest }
+        return CGRect(x: mid - rest.width / 2, y: rest.minY, width: rest.width, height: rest.height)
+    }
+
+    /// 拖动跟手：快、几乎不回弹（磁吸曲线本身负责「卡上」的感觉）
+    private static let follow = Animation.interactiveSpring(response: 0.16, dampingFraction: 0.86)
+    /// 点一下：短而干脆，不来回晃
+    private static let tapSettle = Animation.spring(response: 0.26, dampingFraction: 0.92)
+    /// 拖完松手：落位时轻轻一顿
+    private static let dropSettle = Animation.spring(response: 0.3, dampingFraction: 0.74)
+
+    private func track<Pill: View>(@ViewBuilder pill: @escaping () -> Pill) -> some View {
+        segments
+            .coordinateSpace(name: Self.space)
+            .onPreferenceChange(TabFramesKey.self) { frames = $0 }
+            .backgroundPreferenceValue(TabFramesKey.self, alignment: .topLeading) { frames in
+                if let rect = pillRect(frames) {
+                    pill()
+                        .frame(width: rect.width, height: rect.height)
+                        // 拖着时稍微鼓起来一点，像系统的液态玻璃滑块；点一下不鼓
+                        .scaleEffect(dragX == nil ? 1 : 1.05)
+                        .offset(x: rect.minX, y: rect.minY)
+                        // 只让胶囊自己动，不带动面板其它部分
+                        .animation(dragX != nil ? Self.follow : dropped ? Self.dropSettle : Self.tapSettle, value: rect)
+                        .animation(.spring(response: 0.24, dampingFraction: 0.8), value: dragX == nil)
+                }
+            }
+            .onChange(of: selected) { pending = nil }
+            // 拖过交界、被下一格吸住时，触控板轻轻一震
+            .onChange(of: target) { if dragX != nil { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) } }
+            .contentShape(Capsule())
+            // 点和拖共用一个手势：横向挪过几个点才算拖（胶囊这时才跟手），否则松手当点击，胶囊直接落到那一格。
+            // 这一层和各格所在的坐标系同一个原点（外边距加在外面），用自己的坐标就行
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { value in
+                        if dragX != nil || abs(value.translation.width) > 4 { dragX = value.location.x }
+                    }
+                    .onEnded { value in
+                        let entry = Self.nearest(value.location.x, in: frames) ?? selected
+                        dropped = dragX != nil
+                        dragX = nil
+                        pending = entry
+                        if entry != selected { onSelect(entry) }
+                    }
+            )
+    }
+
+    private var segments: some View {
         HStack(spacing: 0) {
             ForEach(OfficialQuotaEntry.allCases, id: \.self) { entry in
-                let on = entry == selected
+                let on = entry == target
                 let percent = percents[entry] ?? nil
-                Button {
-                    onSelect(entry)
-                } label: {
-                    HStack(spacing: 5) {
+                HStack(spacing: 5) {
                         Circle().fill(Self.tint(entry)).frame(width: 6, height: 6)
                             .opacity(on || active.contains(entry) ? 1 : 0.7)
                             // 正在用：圆点外一圈同色光晕
@@ -531,22 +637,23 @@ struct OfficialTabs: View {
                             .foregroundStyle(dimmed.contains(entry) ? Color.secondary : percent.map { Level.text($0) } ?? Color.secondary)
                             .contentTransition(.numericText())
                             .fixedSize()  // 名字和数字都不截断
-                    }
-                    .lineLimit(1)
-                    .padding(.horizontal, 6)
-                    .frame(maxWidth: .infinity, minHeight: 30)
-                    .background { if on { pill(entry) } }
-                    .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .lineLimit(1)
+                .padding(.horizontal, 6)
+                .frame(maxWidth: .infinity, minHeight: 30)
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(key: TabFramesKey.self, value: [entry: proxy.frame(in: .named(Self.space))])
+                })
                 .help(tr("看 \(entry.serviceName) 的额度", "Show \(entry.serviceName) usage"))
+                // 手势挂在整条上，读屏时每格仍是一个能按的按钮
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel(entry.serviceName)
                 .accessibilityValue(percent.map { Fmt.percent($0) } ?? tr("未知", "Unknown"))
-                .accessibilityAddTraits(on ? .isSelected : [])
+                .accessibilityAddTraits(entry == selected ? [.isButton, .isSelected] : .isButton)
+                .accessibilityAction { onSelect(entry) }
             }
         }
-        // 只让切换条自己动：胶囊滑过去，阻尼大一点，到位就停；不带动面板其它部分的布局
-        .animation(.spring(response: 0.5, dampingFraction: 0.86), value: selected)
+        .animation(.easeOut(duration: 0.15), value: target)
     }
 
     static func tint(_ entry: OfficialQuotaEntry) -> Color {
@@ -555,6 +662,51 @@ struct OfficialTabs: View {
         case .codex: return Color(red: 0.25, green: 0.65, blue: 0.55)
         case .antigravity: return Color(red: 0.36, green: 0.52, blue: 0.95)
         }
+    }
+}
+
+/// 刷新按钮：同一个箭头，匀速转圈。点一下至少转满一圈；读取中（Claude / agy 跑官方 CLI）一直转，
+/// 读完把手上这一圈转完再停，不会半路跳回原位，也不换成系统的小菊花
+struct RefreshButton: View {
+    var busy: Bool
+    var help: String
+    var action: () -> Void
+    @State private var angle = 0.0
+    /// 手上这一圈转到什么时候：新的一圈等它转完再接，不叠在一起忽快忽慢
+    @State private var lapEnds = Date.distantPast
+    private static let lap: TimeInterval = 0.8
+
+    var body: some View {
+        IconButton(systemName: "arrow.clockwise",
+                   help: busy ? tr("正在读取官方额度", "Reading official usage") : help,
+                   rotation: angle) {
+            guard !busy else { return }
+            action()
+            if Date() >= lapEnds { turn() }
+        }
+        // 读取中一圈接一圈；读完或按钮被撤下（换页签、进设置）时 SwiftUI 取消这个任务，已经起步的那圈照常转完
+        .task(id: busy) {
+            guard busy else { return }
+            while !Task.isCancelled {
+                let wait = lapEnds.timeIntervalSinceNow
+                if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+                if Task.isCancelled { return }
+                turn()
+            }
+        }
+    }
+
+    private func turn() {
+        lapEnds = Date().addingTimeInterval(Self.lap)
+        withAnimation(.linear(duration: Self.lap)) { angle += 360 }
+    }
+}
+
+/// 切换条各格的位置
+private struct TabFramesKey: PreferenceKey {
+    static let defaultValue: [OfficialQuotaEntry: CGRect] = [:]
+    static func reduce(value: inout [OfficialQuotaEntry: CGRect], nextValue: () -> [OfficialQuotaEntry: CGRect]) {
+        value.merge(nextValue()) { $1 }
     }
 }
 
@@ -607,15 +759,13 @@ struct AgyGroup: Identifiable {
 /// 一个模型组的卡片：每个窗口一行「标题 + 已用百分比 + 进度条 + 剩余和重置时间」，旧额度卡片的画法
 struct AgyGroupCard: View {
     var group: AgyGroup
-    /// 为准的那个窗口（Gemini 组里用得最多的）
-    var primaryID: String?
     var now: Date
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(group.name)
                 .font(.system(size: 12, weight: .semibold))
-            ForEach(group.windows) { AgyWindowRow(window: $0, isPrimary: $0.id == primaryID, now: now) }
+            ForEach(group.windows) { AgyWindowRow(window: $0, now: now) }
         }
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -625,7 +775,6 @@ struct AgyGroupCard: View {
 
 struct AgyWindowRow: View {
     var window: AgyQuotaPresentation.WindowState
-    var isPrimary = false
     var now: Date
 
     var body: some View {
@@ -635,18 +784,6 @@ struct AgyWindowRow: View {
                 Text(windowName)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
-                if isPrimary {
-                    Text(tr("菜单栏显示", "In menu bar"))
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        // 和进度条同色的淡底，字用同色系深一档，看得清又有颜色
-                        .background(Capsule().fill(Level.bar(used ?? 0).opacity(0.14)))
-                        .foregroundStyle(Level.readable(Level.bar(used ?? 0)))
-                        .fixedSize()
-                        .help(tr("菜单栏和切换条上的 agy 数字取的就是这个窗口（Gemini 组里用得最多的）",
-                                 "The agy number in the menu bar and tab bar comes from this window (the most-used one in the Gemini group)"))
-                }
                 Spacer()
                 if let used {
                     Text(tr("已用", "Used"))
