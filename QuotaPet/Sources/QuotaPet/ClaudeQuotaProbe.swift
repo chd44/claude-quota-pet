@@ -13,6 +13,12 @@ struct ClaudeQuotaProbe: Sendable {
         return await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
     }
 
+    /// 没找到命令行时卡片里的说明：缺什么、怎么办
+    static var notFoundMessage: String {
+        tr("没找到官方 Claude Code 命令行。装好 Claude Code（或 Claude 桌面端）后，在终端运行一次 claude 并登录，这里会自动显示额度。",
+           "Couldn't find the official Claude Code command line. Install Claude Code (or the Claude desktop app), run claude once in Terminal and sign in, and your usage will show up here.")
+    }
+
     static func binary() -> URL? {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
@@ -37,7 +43,7 @@ struct ClaudeQuotaProbe: Sendable {
     private static func perform() async -> ClaudeUsageReading {
         let fm = FileManager.default
         guard let binary = binary() else {
-            return .init(status: .unavailable, message: tr("没找到官方 Claude Code CLI", "Official Claude Code CLI not found"))
+            return .init(status: .unavailable, message: notFoundMessage)
         }
         // 固定的空目录：只有它会被自动信任，也不会碰到任何项目文件
         let directory = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/QuotaPet/ClaudeQuotaCheck", isDirectory: true)
@@ -112,7 +118,7 @@ struct ClaudeQuotaProbe: Sendable {
                 // 最后出现的是登录提示就是要登录（屏幕上残留的旧额度文字不算数）
                 if ClaudeCLIScreen.finalScreen(screen) == .login {
                     return .init(status: .signInRequired, checkedAt: Date(),
-                                 message: tr("请先在终端运行 claude 并登录", "Run claude in Terminal and sign in first"))
+                                 message: tr("Claude Code 命令行还没登录：在终端运行一次 claude 并登录，之后会自动读取额度。", "The Claude Code command line isn't signed in: run claude once in Terminal and sign in, then usage is read automatically."))
                 }
                 if ClaudeCLIScreen.rejectsSessionID(screen) {
                     return .init(status: .unknown, message: tr("官方 Claude Code CLI 版本过旧，不支持 --session-id，请更新后再查",
@@ -137,7 +143,7 @@ struct ClaudeQuotaProbe: Sendable {
             switch ClaudeCLIScreen.finalScreen(screen) {
             case .login:
                 return .init(status: .signInRequired, checkedAt: Date(),
-                             message: tr("请先在终端运行 claude 并登录", "Run claude in Terminal and sign in first"))
+                             message: tr("Claude Code 命令行还没登录：在终端运行一次 claude 并登录，之后会自动读取额度。", "The Claude Code command line isn't signed in: run claude once in Terminal and sign in, then usage is read automatically."))
             case .theme, .securityNotes:
                 // 第一次启动的默认选项（主题「自动」、安全须知），各只确认一次
                 let key = "\(ClaudeCLIScreen.classify(screen))"

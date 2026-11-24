@@ -226,6 +226,18 @@ extension ClaudeUsageReading {
         return UsageSnapshot(provider: .claude, windows: windows, generatedAt: now, officialAt: checkedAt, notes: [])
     }
 
+    /// 没读到额度时面板标题说的原因（和 agy 一样「额度未知 · 原因」）；读到了（哪怕已过期）时为 nil。
+    /// 详细的处理办法在卡片里（message）
+    public var problem: String? {
+        switch status {
+        case .available: return nil
+        case .unavailable: return tr("额度未知 · 没找到 Claude Code 命令行", "Quota unknown · Claude Code command line not found")
+        case .signInRequired: return tr("额度未知 · 请先登录 Claude Code 命令行", "Quota unknown · Sign in to the Claude Code command line first")
+        case .confirmationRequired: return tr("额度未知 · 请在 Claude Code 命令行完成确认", "Quota unknown · Finish the prompt in the Claude Code command line")
+        case .unknown: return tr("额度未知 · 没读到可靠的官方读数", "Quota unknown · No reliable official reading")
+        }
+    }
+
     /// 下一次界面要变的时刻：读数过期，或某个窗口到了重置时间
     public func nextChange(after now: Date) -> Date? {
         guard status == .available else { return nil }

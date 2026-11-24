@@ -72,3 +72,14 @@ func checkAppUpdate() {
     check(UpdateStatus.downloading(sample).busy && UpdateStatus.installing(sample).busy && !UpdateStatus.available(sample).busy
           && UpdateStatus.none.offer == nil && UpdateStatus.failed(sample, "x").offer == sample, "更新状态：下载、安装中算忙")
 }
+
+/// Claude 没读到额度时，面板标题像 agy 一样说原因；读到了（哪怕过期）不说
+func checkClaudeProblem() {
+    check(ClaudeUsageReading(status: .unavailable).problem == "额度未知 · 没找到 Claude Code 命令行", "没找到命令行：标题说出来")
+    check(ClaudeUsageReading(status: .signInRequired).problem == "额度未知 · 请先登录 Claude Code 命令行", "没登录：标题说出来")
+    check(ClaudeUsageReading(status: .confirmationRequired).problem?.contains("确认") == true
+          && ClaudeUsageReading(status: .unknown).problem?.hasPrefix("额度未知") == true, "其他读不到的情况也说额度未知")
+    check(ClaudeUsageReading(status: .available, checkedAt: Date(timeIntervalSince1970: 0)).problem == nil, "读到过（哪怕已过期）：标题不说失败原因")
+    let missing = ClaudeUsageReading(status: .unavailable, message: "装好 Claude Code 后在终端运行一次 claude")
+    check(missing.snapshot(now: Date()).notes == [missing.message] && !missing.snapshot(now: Date()).hasData, "卡片里照样显示怎么办")
+}

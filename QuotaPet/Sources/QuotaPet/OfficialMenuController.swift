@@ -21,6 +21,8 @@ final class OfficialPanelState: ObservableObject {
     @Published var activeEntries: Set<OfficialQuotaEntry> = []
     @Published var querying = false
     @Published var agyStatus = ""
+    /// Claude 没读到额度时的原因（ClaudeUsageReading.problem）；正在读或读到了时为空
+    @Published var claudeStatus = ""
     @Published var runningApps: Set<String> = []
     @Published var maxHeight: CGFloat = .infinity
     /// 点了刷新、还没读完的几家：只有它们的刷新按钮转圈（后台自动读取不转）
@@ -58,7 +60,7 @@ struct OfficialPanelRoot: View {
             case .overview:
                 OfficialOverviewView(entry: entry, choice: settings.officialPetChoice, artwork: artwork,
                                      reading: state.reading, agyHistory: state.agyHistory,
-                                     querying: state.querying, agyStatus: state.agyStatus,
+                                     querying: state.querying, agyStatus: state.agyStatus, claudeStatus: state.claudeStatus,
                                      usage: state.usage, activeEntries: state.activeEntries,
                                      desktopRunning: state.runningApps.contains(desktopID),
                                      canOpenAntigravity: canOpenAntigravity,
@@ -415,6 +417,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         state.usage = (usageStore?.snapshots ?? []).filter { $0.provider == .codex }
             + [claudeSnapshot(now: now)]
         state.claudeQuerying = claudeMonitor.querying
+        state.claudeStatus = claudeMonitor.querying ? "" : claudeMonitor.reading?.problem ?? ""
         // Codex 每轮对话都会在日志里记一条用量：最近那条的时间就是它最近一次在用（不管有没有带总额度）
         let codex = state.usage.first(where: { $0.provider == .codex })
         if let at = codex?.lastActiveAt { recordActive(.codex, at: at) }

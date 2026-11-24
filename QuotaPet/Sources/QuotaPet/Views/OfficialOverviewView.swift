@@ -16,6 +16,8 @@ struct OfficialOverviewView: View {
     var querying = false
     /// 没有可靠读数时的原因（AgyQuotaMonitor.summary）
     var agyStatus = ""
+    /// Claude 没读到额度时的原因（ClaudeUsageReading.problem），面板标题用它
+    var claudeStatus = ""
     /// Claude / Codex 的官方读数快照（ClaudeOfficialProvider / CodexProvider）
     var usage: [UsageSnapshot] = []
     /// 正在用的几家：切换条上的小圆点带光晕
@@ -299,6 +301,7 @@ struct OfficialOverviewView: View {
         switch entry {
         case .claude, .codex:
             guard let snapshot, snapshot.hasData else {
+                if entry == .claude, !claudeStatus.isEmpty { return Headline(title: claudeStatus, color: .secondary) }
                 return Headline(title: tr("暂无可用的官方读数", "No usable official reading"), color: .secondary,
                                 detail: entry == .codex ? desktopText : nil)
             }
@@ -422,7 +425,11 @@ struct OfficialOverviewView: View {
         case .claude, .codex: readAt = snapshot?.officialAt
         case .antigravity: readAt = reading?.checkedAt
         }
-        guard let readAt else { return tr("官方读数 · 等待读取", "Official reading · pending") }
+        guard let readAt else {
+            // 已经试过、没读到（比如没装命令行）：不说「等待读取」，免得和标题的原因对不上
+            if entry == .claude, !claudeStatus.isEmpty { return tr("官方读数 · 没读到", "Official reading · not available") }
+            return tr("官方读数 · 等待读取", "Official reading · pending")
+        }
         return tr("官方读数 · \(Fmt.ago(readAt, now: now))", "Official reading · \(Fmt.ago(readAt, now: now))")
     }
 
