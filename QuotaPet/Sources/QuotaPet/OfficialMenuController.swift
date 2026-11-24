@@ -36,7 +36,7 @@ struct OfficialPanelRoot: View {
     @ObservedObject var state: OfficialPanelState
     @ObservedObject var settings: AppSettings
     var artwork: (OfficialPetChoice, PetMood) -> NSImage
-    var pokeArtwork: (OfficialPetChoice, Bool) -> NSImage?
+    var pokeArtwork: (OfficialPetChoice, String) -> NSImage?
     var canOpenAntigravity: Bool
     var onSelect: (OfficialQuotaEntry) -> Void
     var onOpenOfficial: (OfficialQuotaEntry) -> Void
@@ -259,8 +259,8 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
                           artwork: { [weak self] choice, mood in
                               self?.artwork(file: choice.file(mood: mood, panel: true), points: 96) ?? NSImage()
                           },
-                          pokeArtwork: { [weak self] choice, annoyed in
-                              guard let self, let file = choice.pokeFile(annoyed: annoyed, panel: true), Self.artExists(file) else { return nil }
+                          pokeArtwork: { [weak self] choice, state in
+                              guard let self, let file = choice.reactionFile(state: state, panel: true), Self.artExists(file) else { return nil }
                               return self.artwork(file: file, points: 96)
                           },
                           canOpenAntigravity: antigravityURL != nil,

@@ -170,6 +170,27 @@ func checkAgyPrimaryAndStates() {
     check(prism.pokeFile(annoyed: false, panel: true) == "agy/panel-poke.png" && pilot.pokeFile(annoyed: true, panel: false) == "agy/pilot-menu-pout.png",
           "agy 被戳和闹别扭各有一张图")
     check(OfficialPetChoice(rawValue: "witch")!.pokeFile(annoyed: false, panel: true) == nil, "Claude / Codex 的反应用动画表，不走 agy 的图")
+    // 被戳的反应：节奏和 Claude / Codex 一样，一秒多就回到原来的图；看心情换表情，不是一律脸红笑
+    let happyPoke = OfficialPetChoice.agyReaction(for: .energetic, annoyed: false)
+    check(happyPoke.map(\.state) == ["poke"] && happyPoke.map(\.duration).reduce(0, +) < PetChat.pokeLineDuration,
+          "心情好被戳：被戳图停一秒多，短于台词，之后回到心情图")
+    check(OfficialPetChoice.agyReaction(for: .sleeping, annoyed: false).map(\.state) == ["loading"], "睡着被戳：揉揉眼，不脸红笑")
+    check(OfficialPetChoice.agyReaction(for: .exhausted, annoyed: true).map(\.state) == ["tired"], "快用完时连戳也不闹别扭（和 Claude 一样）")
+    check(OfficialPetChoice.agyReaction(for: .normal, annoyed: true).map(\.state) == ["pout"], "心情好时连戳闹别扭")
+    for mood in PetMood.allCases {
+        let total = OfficialPetChoice.agyReaction(for: mood, annoyed: false).map(\.duration).reduce(0, +)
+        let sprite = PetSprites.reaction(for: mood, style: .classic).map(\.duration).reduce(0, +)
+        // 有点懵时没有合适的另一张图，只说话、弹一下
+        check((mood == .confused || abs(total - sprite) < 0.6) && !OfficialPetChoice.agyReaction(for: mood, annoyed: false).contains { $0.state == "pout" },
+              "\(mood) 的反应长度和 Claude 的相近（\(total) vs \(sprite)）")
+        for frame in OfficialPetChoice.agyReaction(for: mood, annoyed: true) + OfficialPetChoice.agyReaction(for: mood, annoyed: false) {
+            for prefix in ["", "pilot-", "gardener-"] {
+                let file = "agy/\(prefix)panel-\(frame.state).png"
+                check(OfficialPetChoice(rawValue: prefix.isEmpty ? "agy" : prefix == "pilot-" ? "agy-aurora" : "agy-stargazer")!
+                        .reactionFile(state: frame.state, panel: true) == file, "反应帧按这款的状态图命名：\(file)")
+            }
+        }
+    }
     check(OfficialPetChoice.resolved("agy/pilot-panel-nervous.png") { $0 == "agy/pilot-panel.png" } == "agy/pilot-panel.png",
           "还没补的状态图退回这款的基础图")
     check(OfficialPetChoice.resolved("agy/panel-tired.png") { _ in true } == "agy/panel-tired.png", "已有的图直接用")
@@ -187,8 +208,8 @@ func checkAgyPrimaryAndStates() {
     } else { check(false, "agy 每周窗口有平均节奏") }
     check(pacedWindows.first { $0.id == "Gemini · 五小时" }?.pace(now: now) == nil, "agy 5 小时窗口不画平均节奏")
     check(pacedWindows.first { $0.id == "Claude / GPT · 每周" }?.pace(now: now) == nil, "官方没给重置时间的窗口不画平均节奏")
-    check(OfficialPetChoice.brokenArtDigests.count == 12 && OfficialPetChoice.brokenArtDigests.allSatisfy { $0.count == 64 },
-          "0.4.3 的 12 张坏图按指纹登记，当作缺图")
+    check(OfficialPetChoice.brokenArtDigests.count == 18 && OfficialPetChoice.brokenArtDigests.allSatisfy { $0.count == 64 },
+          "0.4.3 的 12 张坏图和带手指的 6 张被戳图按指纹登记，当作缺图")
 
     // 表情：读取状态和变化
     check(AgyQuotaPresentation.trendMood(reading: nil, history: [], querying: true, now: now) == .loading, "第一次读取中：醒过来中")

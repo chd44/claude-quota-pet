@@ -35,9 +35,11 @@ struct OfficialOverviewView: View {
     var refreshNotice: RefreshNotice?
     var onMenu: () -> Void = {}
     var onQuit: () -> Void = {}
-    /// agy 被戳时的反应图（annoyed：连戳闹别扭）；还没补这张图时是 nil
-    var pokeArtwork: (OfficialPetChoice, Bool) -> NSImage? = { _, _ in nil }
-    @State private var agyPoke: Bool?
+    /// agy 被戳时反应里某一帧的图（这款的「-状态」图）；还没补这张图时是 nil，照常显示心情图
+    var pokeArtwork: (OfficialPetChoice, String) -> NSImage? = { _, _ in nil }
+    /// agy 被戳的反应（OfficialPetChoice.agyReaction）和正在显示的那一帧
+    @State private var agyReaction: [OfficialPetChoice.Reaction] = []
+    @State private var agyFrame: OfficialPetChoice.Reaction?
     /// 戳了一下宠物：外面按连戳次数挑一句回话（没反应时是 nil）
     var onPoke: (PetMood) -> (line: String, annoyed: Bool)? = { _ in nil }
     /// 渲染预览图时固定「现在」
@@ -46,7 +48,7 @@ struct OfficialOverviewView: View {
     var pinFooter = false
     var onHeight: (CGFloat) -> Void = { _ in }
 
-    /// 被戳后回的那句、反应表情（Claude / Codex 的形象有反应动画；agy 是静态图，只弹一下）
+    /// 被戳后回的那句、反应表情（Claude / Codex 播动画表里的反应帧；agy 按同样的节奏换一下状态图）
     @State private var pokedLine: String?
     @State private var reaction: [PetFrame] = []
     @State private var reactionFrame: PetFrame?
@@ -176,23 +178,33 @@ struct OfficialOverviewView: View {
         let mood = Self.artMood(entry: entry, snapshot: snapshot, agyReading: reading, agyHistory: agyHistory,
                                 refreshing: entry == .antigravity ? querying : refreshing, now: now)
         let tint = known == nil ? Color(nsColor: .systemGray) : Level.mood(mood)
+        // agy 反应帧真有图时才换（缺图、登记过的坏图就留在心情图上，不做淡入淡出）
+        let agyShown = choice.isAntigravity ? agyFrame.flatMap { frame in pokeArtwork(choice, frame.state).map { (frame.state, $0) } } : nil
+        let agyKey = agyShown?.0 ?? mood.rawValue
         return HStack(alignment: .top, spacing: 12) {
             Button {
                 guard let reply = onPoke(mood) else { return }
                 pokedLine = reply.line
-                agyPoke = choice.isAntigravity ? reply.annoyed : nil
-                // agy 是静态立绘，没有反应动画：清空，绝不沿用上一只宠物的表情
+                // 只放当前这款的反应：Claude / Codex 用动画表，agy 用状态图，绝不沿用上一只宠物的表情
                 reaction = choice.style.map { PetSprites.reaction(for: mood, style: $0, annoyed: reply.annoyed) } ?? []
+                agyReaction = choice.isAntigravity ? OfficialPetChoice.agyReaction(for: mood, annoyed: reply.annoyed) : []
                 reactionFrame = nil
+                agyFrame = nil
                 pokes += 1
             } label: {
-                // 反应表情只画当前这款形象的（切换宠物的瞬间不会露出上一只的表情）
-                Image(nsImage: reactionFrame.flatMap { $0.portrait.style == choice.style ? PetRenderer.image($0.portrait) : nil }
-                      ?? agyPoke.flatMap { choice.isAntigravity ? pokeArtwork(choice, $0) : nil }
-                      ?? artwork(choice, mood))
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
+                // 反应表情只画当前这款形象的（切换宠物的瞬间不会露出上一只的表情）。
+                // agy 每张图的姿势差得多，换图时淡入淡出一下；Claude / Codex 的帧只换脸，照旧直接切
+                ZStack {
+                    Image(nsImage: reactionFrame.flatMap { $0.portrait.style == choice.style ? PetRenderer.image($0.portrait) : nil }
+                          ?? agyShown?.1
+                          ?? artwork(choice, mood))
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .id(choice.isAntigravity ? "\(choice.rawValue)-\(agyKey)" : choice.rawValue)
+                        .transition(.opacity)
+                }
+                .animation(choice.isAntigravity ? .easeInOut(duration: 0.18) : nil, value: agyKey)
                     .frame(width: 96, height: 96)
                     .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(tint.opacity(0.13)))
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -203,7 +215,7 @@ struct OfficialOverviewView: View {
             .accessibilityLabel(tr("戳一下宠物", "Poke the pet"))
             .task(id: "\(pokes)-\(choice.rawValue)") {  // 换了宠物就取消正在播的反应
                 // 播完反应表情回到平时；那句话留到 pokeLineDuration。又戳一下时这个任务会被取消，别把新的那句清掉
-                guard pokes > 0, !reaction.isEmpty || pokedLine != nil else { return }
+                guard pokes > 0, !reaction.isEmpty || !agyReaction.isEmpty || pokedLine != nil else { return }
                 var elapsed: TimeInterval = 0
                 for frame in reaction {
                     reactionFrame = frame
@@ -211,12 +223,19 @@ struct OfficialOverviewView: View {
                     if Task.isCancelled { return }
                     elapsed += frame.duration
                 }
+                for frame in agyReaction {
+                    agyFrame = frame
+                    try? await Task.sleep(nanoseconds: UInt64(frame.duration * 1_000_000_000))
+                    if Task.isCancelled { return }
+                    elapsed += frame.duration
+                }
                 reactionFrame = nil
+                agyFrame = nil
                 let rest = PetChat.pokeLineDuration - elapsed
                 if rest > 0 { try? await Task.sleep(nanoseconds: UInt64(rest * 1_000_000_000)) }
-                if !Task.isCancelled { pokedLine = nil; agyPoke = nil }
+                if !Task.isCancelled { pokedLine = nil }
             }
-            .onChange(of: choice.rawValue) { pokedLine = nil; reactionFrame = nil; reaction = []; agyPoke = nil }  // 换了一只宠物
+            .onChange(of: choice.rawValue) { pokedLine = nil; reactionFrame = nil; reaction = []; agyFrame = nil; agyReaction = [] }  // 换了一只宠物
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(entry.tabName)

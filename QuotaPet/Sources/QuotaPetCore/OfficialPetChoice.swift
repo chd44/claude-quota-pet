@@ -52,13 +52,42 @@ public struct OfficialPetChoice: RawRepresentable, Equatable, Sendable {
 
     /// agy 被戳时的反应图：-poke（被戳一下）/ -pout（连戳闹别扭）。Claude / Codex 用动画表里的反应帧，不走这里
     public func pokeFile(annoyed: Bool, panel: Bool) -> String? {
-        guard isAntigravity else { return nil }
-        let base = panel ? panelFile : menuFile
-        return String(base.dropLast(4)) + (annoyed ? "-pout.png" : "-poke.png")
+        reactionFile(state: annoyed ? "pout" : "poke", panel: panel)
     }
 
-    /// 0.4.3 带来的坏图：「元气满满」是切错的 2×2 拼图碎片，「快撑不住」是整张拼图或标错的表情。
-    /// 按文件内容指纹认：这些图当作缺图（退回基础图）；用 scripts/import-agy-art.sh 重画后指纹变了就自动启用
+    /// agy 反应里某一帧的图：这款的「-状态」图（poke、pout，或 loading、tired 这类心情图）
+    public func reactionFile(state: String, panel: Bool) -> String? {
+        guard isAntigravity else { return nil }
+        let base = panel ? panelFile : menuFile
+        return String(base.dropLast(4)) + "-\(state).png"
+    }
+
+    /// agy 被戳时的一帧：显示哪张状态图、停多久
+    public struct Reaction: Equatable, Sendable {
+        public let state: String
+        public let duration: TimeInterval
+        init(_ state: String, _ duration: TimeInterval) { self.state = state; self.duration = duration }
+    }
+
+    /// agy 被戳的反应，节奏和 Claude / Codex 的动画表一样（PetSprites.reaction）：看心情换一下表情，一秒多就回到原来的图，
+    /// 台词照样留到 pokeLineDuration。只用这款已有的状态图拼，不另画
+    public static func agyReaction(for mood: PetMood, annoyed: Bool) -> [Reaction] {
+        if annoyed, mood.pouts { return [Reaction("pout", 1.6)] }
+        switch mood {
+        case .energetic, .normal, .revived: return [Reaction("poke", 1.4)]  // 被戳到脸颊，「呀！」
+        case .resting: return [Reaction("loading", 0.9)]                    // 迷迷糊糊揉一下眼睛
+        case .nervous: return [Reaction("confused", 0.9)]                   // 吓一跳：「诶？」
+        case .tired: return [Reaction("sleeping", 0.9)]                     // 闭眼缓一缓
+        case .exhausted: return [Reaction("tired", 0.9)]                    // 抬眼看你一下
+        case .sleeping: return [Reaction("loading", 1.4)]                   // 被叫醒揉揉眼，接着睡
+        case .confused, .loading: return []
+        }
+    }
+
+    /// 登记过的坏图，按文件内容指纹认：这些图当作缺图（退回基础图；被戳的反应图缺了就只弹一下、说台词）。
+    /// 用 scripts/import-agy-art.sh 重画后指纹变了就自动启用。
+    /// - 0.4.3 带来的：「元气满满」是切错的 2×2 拼图碎片，「快撑不住」是整张拼图或标错的表情（已重画）
+    /// - 2026-11-24 第一版被戳图：画面边缘伸进来一只别人的手指，用户不要（已重画成她自己捂脸）
     public static let brokenArtDigests: Set<String> = [
         "2891f250156205e20d85bfb9abaee9406d1dcf0cabfe2ef8c6ebd415e2a043e0",  // panel-energetic
         "1fad7934666ed784fc5404828b0cf3b071e07c20843d38a1d1c8de2596063884",  // menu-energetic
@@ -72,6 +101,12 @@ public struct OfficialPetChoice: RawRepresentable, Equatable, Sendable {
         "b48a3ca98de0c35a2553cd94669cff0598ca9c19305035bd1fcd8b1029e0d666",  // gardener-menu-energetic
         "f5b3ad4c2c11685496f92422117c9a1ff2f03a114fec2a1bddaa0c2d75105f2b",  // gardener-panel-exhausted
         "003e2bd2878193dd094f2dc16b1bf2fc7e84976a28736ba9bed47c40648f9a80",  // gardener-menu-exhausted
+        "2daf1ab58e7ddbefb927fa064e7415224e5fed23ef16f8096115e08e7dfb2b7b",  // panel-poke（带手指）
+        "728ef421ff796893938a95c8d9024bdddb89f4b4f7cb6b3a2cb922a7f9df1250",  // menu-poke
+        "448b310052a68f388c5594a9bf2e09da869603e966f7376fac03e4c361e8da9d",  // pilot-panel-poke
+        "6456a96c4457d351f828b4ce58867b6e03bb7adf03fef12684b0585843d98e18",  // pilot-menu-poke
+        "f980a720c0f11b6e0cc6b20cbfd5237c4c452c62a5d06073536326964685bd21",  // gardener-panel-poke
+        "67d6fb9d8a0b84e951294419a1cce6eceb969a65ee260422d6ecb5fd4212b902",  // gardener-menu-poke
     ]
 
     /// 文件不存在时退回这款的基础图（没补的状态图不会变成空白）
