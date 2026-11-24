@@ -17,7 +17,7 @@ QuotaPet 启动后立即通过官方 CLI 的交互式 `/usage` 读取 agy 和 Cl
 
 0.4.2（build 15）在 `Resources/Pets/agy` 下包含三款的六张中性 PNG：默认棱镜礼装（Prism Regalia）的 `menu.png` / `panel.png`，反重力飞行员（Zero-G Pilot）的 `pilot-menu.png` / `pilot-panel.png`，绣球花匠（Hydrangea Gardener）的 `gardener-menu.png` / `gardener-panel.png`。每组分别用于菜单栏头像和额度面板半身像。图片在本地加载；有效 agy 真实读数可切换额度状态。切换官方入口时更新，Claude 和 Codex 各自记住选过的形象，切回 agy 也恢复上次 agy 款式。agy 形象参考 ZipZipPipe 的「Gemini 娘」。[角色原设](https://www.bilibili.com/opus/1233069202138464289)
 
-agy 的额度以 Gemini 组为准（`AgyQuotaPresentation.primaryWindow`：这组里用得最多的窗口），菜单栏数字、切换条和宠物表情都用它，面板标题写明是哪个窗口（窗口行上不再另加「菜单栏显示」标签）；面板里仍列出全部模型组。补充状态图（刚恢复、歇着、有点慌、有点懵、醒过来中、被戳、闹别扭）和需要重画的「元气满满」「快撑不住」见 [design/agy-states](../design/agy-states/README.md)，用 `scripts/import-agy-art.sh` 导入；缺图或登记过的坏图（`OfficialPetChoice.brokenArtDigests`）退回这款的基础图。
+agy 的额度以 Gemini 组为准（`AgyQuotaPresentation.primaryWindow`：这组里用得最多的窗口），菜单栏数字、切换条和宠物表情都用它，面板标题写明是哪个窗口（窗口行上不再另加「菜单栏显示」标签）；面板里仍列出全部模型组。三款的补充状态图（刚恢复、歇着、有点慌、有点懵、醒过来中、被戳、闹别扭）都已补齐，「元气满满」「快撑不住」也已重画；提示词见 [design/agy-states](../design/agy-states/README.md)，以后重画仍用 `scripts/import-agy-art.sh` 导入；缺图或登记过的坏图（`OfficialPetChoice.brokenArtDigests`）退回这款的基础图。
 
 `scripts/agy-asset-names.sh` 是打包、归档检查与 CI fixture 共用的唯一清单：三款前缀（空、`pilot-`、`gardener-`）× `menu` / `panel` × 中性或 `energetic` / `tired` / `exhausted` / `sleeping` 后缀，共 30 张必需 PNG；`--optional` 列出 42 张可补充的状态图，有就打包，没有不报错。例如 `pilot-menu-tired.png`。`build-app.sh` 按共享清单显式复制至 App 的 `Contents/Resources/Pets/agy/`，不复制参考图或其他中间产物。`check-release-archive.sh` 在解压后的最终 zip 中检查 30 图存在且格式为 PNG，agy 目录拒绝其他文件，旧形象的 portrait/icon 文件规则保留。发包时还需核对源图与包内图的 SHA-256 一致，并在图形会话查看三款菜单栏和面板实际显示，以及切换服务后是否恢复所选款式。此处版本与图形验收不代表已发布。
 

@@ -234,7 +234,7 @@ struct OfficialOverviewView: View {
                     }
                 }
                 // 两行：一句结论，一句她说的话（戳她时换成回话）
-                let lines = headline(agy: agy, now: now)
+                let lines = headline(agy: agy, mood: mood, now: now)
                 Text(lines.title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(lines.color)
@@ -272,7 +272,7 @@ struct OfficialOverviewView: View {
         var note: String?
     }
 
-    private func headline(agy: AgyQuotaPresentation, now: Date) -> Headline {
+    private func headline(agy: AgyQuotaPresentation, mood: PetMood, now: Date) -> Headline {
         switch entry {
         case .claude, .codex:
             guard let snapshot, snapshot.hasData else {
@@ -311,7 +311,9 @@ struct OfficialOverviewView: View {
                 : tr("\(top.group) \(short)已用 \(Fmt.percent(used))", "\(top.group) \(short): \(Fmt.percent(used)) used")
             return Headline(title: title,
                             color: used >= 90 ? Color(nsColor: .systemRed) : used >= 75 ? Color(nsColor: .systemOrange) : .primary,
-                            detail: tr("\(top.group) 组 · 还剩 \(remaining)", "\(top.group) group · \(remaining) left"))
+                            // 和 Claude / Codex 一样，第二行是她说的话（心情和头像同一个），剩余多少看下面的卡片
+                            detail: agy.petLine(mood: mood, now: now)
+                                ?? tr("\(top.group) 组 · 还剩 \(remaining)", "\(top.group) group · \(remaining) left"))
         }
     }
 

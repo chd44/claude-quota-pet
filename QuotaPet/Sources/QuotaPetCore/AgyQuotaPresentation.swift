@@ -142,3 +142,37 @@ extension AgyQuotaPresentation.WindowState {
                            startedAt: reset.addingTimeInterval(-duration), resetsAt: reset, scheduleKnown: true).pace(now: now)
     }
 }
+
+extension AgyQuotaPresentation {
+    /// 面板第二行她说的话，和 Claude / Codex 的口吻一致（PetTalk 第一句的那几种说法）。
+    /// 只说为准的那组（Gemini）：心情用面板头像同一个（trendMood），不另外推算烧得多快、何时见底。
+    /// 为准的窗口没有可用读数时为 nil
+    public func petLine(mood: PetMood, now: Date, calendar: Calendar = .current) -> String? {
+        guard let top = primaryWindow, let used = top.usedPercent else { return nil }
+        let week: TimeInterval = 7 * 86400
+        let left = max(1, Int((100 - used).rounded()))
+        switch mood {
+        case .sleeping:
+            guard let back = top.resetsAt, back > now else { return mood.line }
+            let clock = Fmt.clock(back, now: now, calendar: calendar)
+            return top.duration == week
+                ? tr("这周的用完了，\(clock) 见 zzz", "This week's quota is gone until \(clock) zzz")
+                : tr("额度用完啦，\(clock) 见 zzz", "All used up until \(clock) zzz")
+        case .exhausted:
+            return tr("只剩 \(left)% 了，挑要紧的做！", "Only \(left)% left. Pick what matters!")
+        case .energetic, .normal, .resting:
+            // 不紧张的时候看这组每周窗口的平均节奏（只用官方重置时间和固定窗口长度）
+            let paces = windows.filter { $0.group == top.group }.compactMap { window in window.pace(now: now).map { (window, $0) } }
+            if let far = paces.max(by: { abs($0.1.ahead) < abs($1.1.ahead) }), abs(far.1.ahead) >= 10 {
+                let points = Int(abs(far.1.ahead).rounded())
+                let period = far.0.duration == week ? tr("这周", "this week") : tr("最近", "lately")
+                return far.1.ahead > 0
+                    ? tr("\(period)用得有点猛，比平均多 \(points) 个点", "Going hard \(period): \(plural(points, "point")) over an even pace")
+                    : tr("\(period)省了 \(points) 个点，可以放开用～", "\(plural(points, "point")) under pace \(period), go for it~")
+            }
+            return mood.line
+        default:
+            return mood.line
+        }
+    }
+}

@@ -205,6 +205,22 @@ func checkAgyPrimaryAndStates() {
           "一个半小时没变化：歇着呢")
     check(AgyQuotaPresentation.trendMood(reading: reading(95, 3, 0, at: now), history: [earlier], querying: false, now: now) == .exhausted,
           "快用完时照档位，不被变化覆盖")
+
+    // 面板第二行：和 Claude / Codex 一样是她说的话，只说 Gemini 组，心情和头像同一个
+    let pacedView = AgyQuotaPresentation(reading: paced, now: now)
+    check(pacedView.petLine(mood: .normal, now: now) == PetMood.normal.line, "节奏差不到 10 个点：说这个心情的那句")
+    let saving = AgyQuotaReading(status: .available, remainingPercent: 80, groupName: "Gemini · 每周", checkedAt: now,
+                                 groupTitle: "Gemini", windowTitle: "每周", windows: [
+        .init(group: "Gemini", window: "每周", remainingPercent: 80, resetsAt: now.addingTimeInterval(3.5 * 86400)),
+        .init(group: "Claude / GPT", window: "五小时", remainingPercent: 10, resetsAt: now.addingTimeInterval(3600)),
+    ])
+    let savingLine = AgyQuotaPresentation(reading: saving, now: now).petLine(mood: .energetic, now: now)
+    check(savingLine == "这周省了 30 个点，可以放开用～", "Gemini 每周比平均少用 30 点：和 Claude 一样说省了几个点（别组用到 90% 也不提）：\(savingLine ?? "nil")")
+    check(AgyQuotaPresentation(reading: saving, now: now).petLine(mood: .resting, now: now) == savingLine, "歇着时也先说节奏，和 PetTalk 的顺序一致")
+    let tight = AgyQuotaPresentation(reading: reading(95, 3, 0, at: now), now: now)
+    check(tight.petLine(mood: .exhausted, now: now) == "只剩 5% 了，挑要紧的做！", "快用完：说还剩多少")
+    check(tight.petLine(mood: .nervous, now: now) == PetMood.nervous.line, "有点慌：说慌的那句，不推算何时见底")
+    check(AgyQuotaPresentation(reading: nil, now: now).petLine(mood: .normal, now: now) == nil, "没有读数时不说话（面板退回原来的说明）")
 }
 
 /// 评审意见：agy 面板重画后只认现在这一屏；Claude Code 干完活的自动读取被限频时不丢
