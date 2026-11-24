@@ -13,3 +13,6 @@ QuotaPet/design/out/
 
 # Claude Code 的本机设置
 .claude/settings.local.json
+
+# 和 GPT / Codex 来回交接的过程资料（含本机日志和路径），只留在本机
+docs/交接资料/
