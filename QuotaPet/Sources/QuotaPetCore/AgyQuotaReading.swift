@@ -65,6 +65,8 @@ public enum AgyQuotaParser {
             let text = trimmed.lowercased()
             if text == "gemini models" { group = "Gemini"; window = nil }
             else if text == "claude and gpt models" { group = "Claude / GPT"; window = nil }
+            // agy 1.5.15 起 Argon 并入 GEMINI MODELS 组（只在「Models within this group」里列名，不单独计额度）；
+            // 下面两条只为还没更新的旧版 CLI 保留它单独的每周窗口
             else if text.contains("argon") && trimmed == trimmed.uppercased() { group = "Gemini Argon"; window = nil }
             else if trimmed == trimmed.uppercased(), trimmed.range(of: "[A-Z]", options: .regularExpression) != nil { group = nil; window = nil }
             if text == "gemini 4 argon weekly limit" { group = "Gemini Argon"; window = "每周" }

@@ -2,13 +2,47 @@ import Foundation
 import QuotaPetCore
 
 func checkAgyQuotaParser() {
-    // Synthetic values in the observed official layout; no real account fixture.
+    // Synthetic values in the observed official layout (agy 1.5.15: Argon 并入 Gemini 组); no real account fixture.
     let panel = """
+    └ Models & Quota
+      Account: user@example.com
+    GEMINI MODELS
+      Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Orchestrator (Argon), Gemini 3.8 Flash
+      Weekly Limit Remaining
+    [████░] 62.50%
+    Quota available
+      Five Hour Limit Remaining
+    [████] 81.00%
+    Quota available
+    CLAUDE AND GPT MODELS
+      Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B
+      Weekly Limit Remaining
+    [██░░] 24.25%
+    Refreshes in 72h 15m
+      Five Hour Limit Remaining
+    [████] 100.00%
+    Quota available
+      │Within each group, models share a weekly limit and a 5-hour limit. Quota is
+      │consumed proportionally to the cost of the tokens.
+    """
+    let now = Date(timeIntervalSince1970: 1000)
+    let reading = AgyQuotaParser.parse(panel, now: now)
+    check(reading.status == .available && reading.remainingPercent == 24.25, "agy 取所有明确窗口中最低的剩余额度")
+    check(reading.groupTitle == "Claude / GPT" && reading.windowTitle == "每周", "agy 最紧张窗口带上所在组和窗口")
+    check(reading.windows.map { $0.group + "|" + $0.window } == ["Gemini|每周", "Gemini|五小时", "Claude / GPT|每周", "Claude / GPT|五小时"],
+          "agy 新版面板只有两组四个窗口：组内模型名单里提到 Argon 不另开一组")
+    check(reading.windows[0].resetsAt == nil, "agy「Quota available」不是重置时间")
+    check(reading.resetsAt == now.addingTimeInterval(72 * 3600 + 15 * 60), "agy 仅依据官方 refresh 文本计算重置时刻")
+    check(reading.checkedAt == now, "agy 读数保留查询时刻")
+    check(AgyQuotaParser.parse(panel.replacingOccurrences(of: "24.25%", with: "0%")).remainingPercent == 0, "agy 官方确实显示零时才返回零")
+    check(AgyQuotaParser.parse(panel.replacingOccurrences(of: "24.25%", with: "101%")).status == .unknown, "agy 超范围百分比使整屏未知")
+    check(AgyQuotaParser.parse(panel.replacingOccurrences(of: "Within each group, models share a weekly limit and a 5-hour limit.", with: "")).status == .unknown, "agy 未画完说明段的面板不提前返回")
+    // 还没更新的旧版 CLI：Argon 单独一栏每周额度，仍按官方面板读出来
+    let legacyPanel = """
     Models & Quota
     GEMINI MODELS
     Weekly Limit Remaining
     [████░] 62.50%
-    Refreshes in 72h 15m
     Five Hour Limit Remaining
     [████] 81.00%
     CLAUDE AND GPT MODELS
@@ -21,15 +55,9 @@ func checkAgyQuotaParser() {
     Refreshes in 72h 15m
     Within each group, models share a weekly limit and a 5-hour limit.
     """
-    let now = Date(timeIntervalSince1970: 1000)
-    let reading = AgyQuotaParser.parse(panel, now: now)
-    check(reading.status == .available && reading.remainingPercent == 24.25, "agy 取所有明确窗口中最低的剩余额度")
-    check(reading.groupTitle == "Gemini Argon" && reading.windowTitle == "每周", "agy Argon 独立窗口不沿用 Claude 标签")
-    check(reading.resetsAt == now.addingTimeInterval(72 * 3600 + 15 * 60), "agy 仅依据官方 refresh 文本计算重置时刻")
-    check(reading.checkedAt == now, "agy 读数保留查询时刻")
-    check(AgyQuotaParser.parse(panel.replacingOccurrences(of: "24.25%", with: "0%")).remainingPercent == 0, "agy 官方确实显示零时才返回零")
-    check(AgyQuotaParser.parse(panel.replacingOccurrences(of: "24.25%", with: "101%")).status == .unknown, "agy 超范围百分比使整屏未知")
-    check(AgyQuotaParser.parse(panel.replacingOccurrences(of: "Within each group, models share a weekly limit and a 5-hour limit.", with: "")).status == .unknown, "agy 未结束的面板不能提前返回基础组而漏掉Argon")
+    let legacy = AgyQuotaParser.parse(legacyPanel, now: now)
+    check(legacy.windows.count == 5 && legacy.groupTitle == "Gemini Argon" && legacy.windowTitle == "每周" && legacy.remainingPercent == 24.25,
+          "旧版 agy 单列的 Argon 每周窗口不沿用 Claude 标签")
     check(AgyQuotaParser.parse("Models & Quota\nGEMINI MODELS\nWeekly Limit Remaining\n[bar] 20%").status == .unknown, "agy 截断面板不冒充所有模型的最低值")
     check(AgyQuotaParser.parse(panel.replacingOccurrences(of: "Weekly Limit Remaining", with: "Weekly Limit Used")).status == .unknown, "agy 不混淆已用与剩余")
     check(AgyQuotaParser.parse("You are currently not signed in.").status == .signInRequired, "agy 登录面板不解析额度")
@@ -55,23 +83,21 @@ func checkAgyPanelWindows() {
     Five Hour Limit Remaining
     [████] 30.00%
     Refreshes in 10m
-    Gemini 4 Argon Weekly Limit
-    [██░░] 44.00%
     Within each group, models share a weekly limit and a 5-hour limit.
     """
     let now = Date(timeIntervalSince1970: 10_000)
     let reading = AgyQuotaParser.parse(panel, now: now)
     check(reading.windows.map { $0.group + "|" + $0.window } ==
-          ["Gemini|每周", "Gemini|五小时", "Claude / GPT|每周", "Claude / GPT|五小时", "Gemini Argon|每周"],
+          ["Gemini|每周", "Gemini|五小时", "Claude / GPT|每周", "Claude / GPT|五小时"],
           "agy 读数按官方顺序保留全部窗口")
-    check(reading.windows.map(\.remainingPercent) == [62.5, 81, 91, 30, 44], "agy 每个窗口保留各自的剩余百分比")
+    check(reading.windows.map(\.remainingPercent) == [62.5, 81, 91, 30], "agy 每个窗口保留各自的剩余百分比")
     check(reading.windows[1].resetsAt == now.addingTimeInterval(7200) && reading.windows[2].resetsAt == nil,
           "agy 重置时间只跟在它下面的窗口，不串到别的窗口")
     check(reading.remainingPercent == 30 && reading.groupName == "Claude / GPT · 五小时", "最紧张字段仍取最低剩余")
 
     let fresh = AgyQuotaPresentation(reading: reading, now: now.addingTimeInterval(60))
-    check(fresh.windows.count == 5, "新鲜读数时面板画出全部 5 个窗口")
-    check(fresh.windows.map(\.usedPercent) == [37.5, 19, 9, 70, 56], "面板按已用 = 100 − 官方剩余显示")
+    check(fresh.windows.count == 4, "新鲜读数时面板画出全部 4 个窗口")
+    check(fresh.windows.map(\.usedPercent) == [37.5, 19, 9, 70], "面板按已用 = 100 − 官方剩余显示")
     check(fresh.windows.filter(\.isTightest).map(\.id) == ["Claude / GPT · 五小时"], "只标一个最紧张窗口")
     check(fresh.windows.allSatisfy { $0.title.contains($0.group) }, "窗口标题带上模型组")
 
@@ -115,20 +141,20 @@ func checkAgyPanelWindows() {
 /// agy 以 Gemini 组为准；补充状态图的文件名和缺图退回；按读数变化的表情
 func checkAgyPrimaryAndStates() {
     let now = Date(timeIntervalSince1970: 20_000)
-    func reading(_ geminiWeekly: Double, _ geminiFive: Double, _ claudeFive: Double, argon: Double? = nil, at: Date) -> AgyQuotaReading {
+    func reading(_ geminiWeekly: Double, _ geminiFive: Double, _ claudeFive: Double, claudeWeekly: Double? = nil, at: Date) -> AgyQuotaReading {
         var windows = [
             AgyQuotaReading.Window(group: "Gemini", window: "每周", remainingPercent: 100 - geminiWeekly),
             AgyQuotaReading.Window(group: "Gemini", window: "五小时", remainingPercent: 100 - geminiFive),
             AgyQuotaReading.Window(group: "Claude / GPT", window: "五小时", remainingPercent: 100 - claudeFive),
         ]
-        if let argon { windows.append(.init(group: "Gemini Argon", window: "每周", remainingPercent: 100 - argon)) }
+        if let claudeWeekly { windows.append(.init(group: "Claude / GPT", window: "每周", remainingPercent: 100 - claudeWeekly)) }
         let tight = windows.min { $0.remainingPercent < $1.remainingPercent }!
         return AgyQuotaReading(status: .available, remainingPercent: tight.remainingPercent, groupName: tight.group + " · " + tight.window,
                                checkedAt: at, groupTitle: tight.group, windowTitle: tight.window, windows: windows)
     }
-    let r = reading(48, 3, 0, argon: 66, at: now)
+    let r = reading(48, 3, 0, claudeWeekly: 66, at: now)
     let p = AgyQuotaPresentation(reading: r, now: now)
-    check(p.usedPercent == 66, "最紧张字段仍是所有窗口里最紧张的（Argon 66%）")
+    check(p.usedPercent == 66, "最紧张字段仍是所有窗口里最紧张的（Claude / GPT 每周 66%）")
     check(p.primaryWindow?.id == "Gemini · 每周" && p.primaryUsedPercent == 48, "agy 以 Gemini 组为准：取这组里用得最多的窗口")
     check(p.primaryMood == .energetic, "宠物表情按 Gemini 的 48%")
     check(MenuBarPercent.text(usedPercent: p.primaryUsedPercent, mode: .tightest) == Fmt.percent(48), "菜单栏显示 Gemini 的数字")
@@ -183,7 +209,7 @@ func checkAgyPrimaryAndStates() {
 
 /// 评审意见：agy 面板重画后只认现在这一屏；Claude Code 干完活的自动读取被限频时不丢
 func checkRedrawAndActivityRefresh() {
-    func panel(_ geminiWeekly: String, _ argon: String) -> String {
+    func panel(_ geminiWeekly: String, _ claudeFive: String) -> String {
         """
         Models & Quota
         GEMINI MODELS
@@ -195,9 +221,7 @@ func checkRedrawAndActivityRefresh() {
         Weekly Limit Remaining
         [████] 91.00%
         Five Hour Limit Remaining
-        [████] 100.00%
-        Gemini 4 Argon Weekly Limit
-        [██░░] \(argon)
+        [██░░] \(claudeFive)
         Within each group, models share a weekly limit and a 5-hour limit.
         """.replacingOccurrences(of: "\n", with: "\r\n")
     }
@@ -206,7 +230,7 @@ func checkRedrawAndActivityRefresh() {
     screen.feed(panel("62.50%", "24.25%"))
     screen.feed("\u{1B}[2J\u{1B}[H" + panel("40.00%", "70.00%"))
     let reading = AgyQuotaParser.parse(terminal: screen, now: now)
-    check(reading.status == .available && reading.windows.count == 5, "agy 面板清屏重画后只读现在这一屏（5 个窗口，不是 10 个）")
+    check(reading.status == .available && reading.windows.count == 4, "agy 面板清屏重画后只读现在这一屏（4 个窗口，不是 8 个）")
     check(reading.windows.first?.remainingPercent == 40 && reading.remainingPercent == 40, "agy 取重画后的新数字，不保留旧帧的最低值")
     check(Set(reading.windows.map { $0.group + $0.window }).count == reading.windows.count, "agy 窗口不重复（面板里的 id 唯一）")
     var banner = VirtualTerminal(rows: 70, columns: 220)

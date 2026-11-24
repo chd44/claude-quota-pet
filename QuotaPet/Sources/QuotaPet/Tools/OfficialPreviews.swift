@@ -64,7 +64,7 @@ enum OfficialPreviews {
         print("正常模式面板预览图已写入 \(dir.path)")
     }
 
-    /// 合成的官方面板：两组各有每周和五小时窗口，外加 Argon 每周窗口
+    /// 合成的官方面板：两组各有每周和五小时窗口（agy 1.5.15 起 Argon 并入 Gemini 组，不再单列）
     static func sampleReading(now: Date, tightResetIn: TimeInterval = 95 * 60) -> AgyQuotaReading {
         let checked = now.addingTimeInterval(-4 * 60)
         let windows = [
@@ -72,7 +72,6 @@ enum OfficialPreviews {
             AgyQuotaReading.Window(group: "Gemini", window: "五小时", remainingPercent: 81, resetsAt: now.addingTimeInterval(2 * 3600 + 40 * 60)),
             AgyQuotaReading.Window(group: "Claude / GPT", window: "每周", remainingPercent: 91, resetsAt: nil),
             AgyQuotaReading.Window(group: "Claude / GPT", window: "五小时", remainingPercent: 18, resetsAt: now.addingTimeInterval(tightResetIn)),
-            AgyQuotaReading.Window(group: "Gemini Argon", window: "每周", remainingPercent: 44, resetsAt: now.addingTimeInterval(5 * 86400)),
         ]
         let top = windows[3]
         return AgyQuotaReading(status: .available, remainingPercent: top.remainingPercent,
