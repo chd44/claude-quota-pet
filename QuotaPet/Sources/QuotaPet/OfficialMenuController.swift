@@ -23,6 +23,8 @@ final class OfficialPanelState: ObservableObject {
     @Published var agyStatus = ""
     @Published var runningApps: Set<String> = []
     @Published var maxHeight: CGFloat = .infinity
+    /// 点了刷新、还没读完的几家：只有它们的刷新按钮转圈（后台自动读取不转）
+    @Published var manualRefreshing: Set<OfficialQuotaEntry> = []
     /// 点了刷新后在页脚停几秒的结果提示
     @Published var refreshNotice: RefreshNotice?
     /// 戳宠物的台词和连戳次数；从随机的一句开始
@@ -59,6 +61,7 @@ struct OfficialPanelRoot: View {
                                      canOpenAntigravity: canOpenAntigravity,
                                      onSelect: onSelect, onOpenOfficial: onOpenOfficial, onOpenAntigravity: onOpenAntigravity,
                                      refreshing: entry == .claude ? state.claudeQuerying : entry == .antigravity ? state.querying : false,
+                                     manualRefreshing: state.manualRefreshing.contains(entry),
                                      onRefresh: { onRefresh(entry) },
                                      refreshNotice: state.refreshNotice,
                                      onMenu: { state.page = .settings }, onQuit: onQuit,
@@ -704,6 +707,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         let now = Date()
         if monitor.refreshNow() || monitor.querying {
             refreshRequests[entry] = now  // 正好在自动读：这次读完也报结果
+            state.manualRefreshing.insert(entry)
         } else {
             showNotice(.tooSoon(entry: entry, wait: monitor.manualWait(now: now), now: now))
         }
@@ -713,6 +717,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
     private func finishRefresh<R: TimedReading>(_ entry: OfficialQuotaEntry, _ monitor: CLIQuotaMonitor<R>) {
         guard let requested = refreshRequests[entry], !monitor.querying else { return }
         refreshRequests[entry] = nil
+        state.manualRefreshing.remove(entry)
         showNotice(.cliFinished(entry: entry, usable: monitor.reading?.isUsable ?? false, checkedAt: monitor.reading?.checkedAt,
                                 requestedAt: requested, message: monitor.reading?.message ?? "", now: Date()))
     }

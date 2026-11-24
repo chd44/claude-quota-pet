@@ -26,8 +26,10 @@ struct OfficialOverviewView: View {
     var onSelect: (OfficialQuotaEntry) -> Void = { _ in }
     var onOpenOfficial: (OfficialQuotaEntry) -> Void = { _ in }
     var onOpenAntigravity: () -> Void = {}
-    /// 这家正在读取（刷新按钮换成转圈）
+    /// 这家正在读取（含后台自动读取；宠物第一次读取时用「醒过来中」）
     var refreshing = false
+    /// 用户点了刷新、这次还没读完：只有这时刷新按钮一直转
+    var manualRefreshing = false
     var onRefresh: () -> Void = {}
     /// 刚点完刷新的结果（成功、没读到、要等一会儿），在页脚停几秒
     var refreshNotice: RefreshNotice?
@@ -223,8 +225,9 @@ struct OfficialOverviewView: View {
                     StatusBadge(text: badge(known: known != nil, mood: mood), tint: tint)
                     Spacer(minLength: 0)
                     HStack(spacing: 0) {
-                        // 三家同一个刷新按钮：点了至少转一圈，读取没结束就一直转，读完转完这一圈停下
-                        RefreshButton(busy: refreshing, help: refreshHelp, action: onRefresh)
+                        // 三家同一个刷新按钮：点了至少转一圈，点的这次没读完就一直转，读完转完这一圈停下；
+                        // 后台自动读取不转，免得切过去看到一直在转
+                        RefreshButton(busy: manualRefreshing, help: refreshHelp, action: onRefresh)
                             .id(entry)  // 换页签时各家从自己的状态开始，不接着上一家没转完的那圈
                         IconButton(systemName: "gearshape", help: tr("宠物形象、启动方式和更多", "Pet, startup and more"),
                                    action: onMenu)
@@ -696,7 +699,7 @@ struct OfficialTabs: View {
     }
 }
 
-/// 刷新按钮：同一个箭头，匀速转圈。点一下至少转满一圈；读取中（Claude / agy 跑官方 CLI）一直转，
+/// 刷新按钮：同一个箭头，匀速转圈。点一下至少转满一圈；点了刷新、官方 CLI 还在读时（Claude / agy）一直转，
 /// 读完把手上这一圈转完再停，不会半路跳回原位，也不换成系统的小菊花
 struct RefreshButton: View {
     var busy: Bool
