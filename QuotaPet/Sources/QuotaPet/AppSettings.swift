@@ -74,6 +74,15 @@ final class AppSettings: ObservableObject {
     @Published var autoFollowActive: Bool {
         didSet { defaults.set(autoFollowActive, forKey: Keys.autoFollowActive) }
     }
+    /// 每天向 GitHub 查一次有没有新版本（AppUpdate）；有新版时面板和菜单里出现更新按钮
+    @Published var checkForUpdates: Bool {
+        didSet { defaults.set(checkForUpdates, forKey: Keys.checkForUpdates) }
+    }
+    /// 上一次试着检查新版本的时间（成功失败都记，失败了也等一天再查）
+    var updateLastAttempt: Date? {
+        get { defaults.object(forKey: Keys.updateLastAttempt) as? Date }
+        set { defaults.set(newValue, forKey: Keys.updateLastAttempt) }
+    }
     @Published var animatePet: Bool {
         didSet { defaults.set(animatePet, forKey: Keys.animatePet) }
     }
@@ -128,6 +137,7 @@ final class AppSettings: ObservableObject {
         defaults.register(defaults: [
             Keys.animatePet: true,
             Keys.autoFollowActive: true,
+            Keys.checkForUpdates: true,
             Keys.notificationsEnabled: true,
             Keys.thresholds: [75, 90, 100],
             Keys.notifyRunningOut: true,
@@ -159,6 +169,7 @@ final class AppSettings: ObservableObject {
         showCodex = defaults.bool(forKey: Keys.showCodex)
         animatePet = defaults.bool(forKey: Keys.animatePet)
         autoFollowActive = defaults.bool(forKey: Keys.autoFollowActive)
+        checkForUpdates = defaults.bool(forKey: Keys.checkForUpdates)
         notificationsEnabled = defaults.bool(forKey: Keys.notificationsEnabled)
         thresholds = (defaults.array(forKey: Keys.thresholds) as? [Int]) ?? [75, 90, 100]
         notifyRunningOut = defaults.bool(forKey: Keys.notifyRunningOut)
@@ -334,6 +345,8 @@ final class AppSettings: ObservableObject {
         static let showCodex = "showCodex"
         static let animatePet = "animatePet"
         static let autoFollowActive = "autoFollowActive"
+        static let checkForUpdates = "checkForUpdates"
+        static let updateLastAttempt = "updateLastAttempt"
         static let followStarts = "followStarts"
         static let ownClaudeQuery = "lastOwnClaudeQuery"
         static let codexRejected = "codexRejectedRecords"

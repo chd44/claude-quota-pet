@@ -104,8 +104,15 @@ struct OfficialSettingsView: View {
                 .labelsHidden()
             }
 
-            Text(tr("数据只来自官方读数：Claude Code CLI 和 agy CLI 的 /usage（由官方 CLI 自己联网），以及 Codex 日志里服务器给的读数。QuotaPet 自己不联网，不读登录凭据和对话内容。",
-                    "Data comes only from official readings: the Claude Code and agy CLIs’ /usage (the official CLIs do the network calls) and the readings Codex logs from its server. QuotaPet itself makes no network calls and reads no credentials or conversation content."))
+            SettingsGroup(tr("更新", "Updates")) {
+                SwitchRow(tr("每天检查新版本", "Check for new versions daily"),
+                          subtitle: tr("每天向 GitHub 查一次 QuotaPet 的最新版本号，不发送任何本机信息。有新版时面板里出现更新按钮，点了才下载，校验后替换并重新打开。",
+                                       "Once a day, asks GitHub for QuotaPet’s latest version number and sends nothing about this Mac. When there’s a new version an update button appears in the panel; it only downloads when you click it, then verifies, replaces and reopens the app."),
+                          isOn: $settings.checkForUpdates)
+            }
+
+            Text(tr("数据只来自官方读数：Claude Code CLI 和 agy CLI 的 /usage（由官方 CLI 自己联网），以及 Codex 日志里服务器给的读数。QuotaPet 只在检查和下载新版本时访问 GitHub，不读登录凭据和对话内容。",
+                    "Data comes only from official readings: the Claude Code and agy CLIs’ /usage (the official CLIs do the network calls) and the readings Codex logs from its server. QuotaPet itself only contacts GitHub to check for and download new versions, and reads no credentials or conversation content."))
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -29,6 +29,8 @@ final class OfficialPanelState: ObservableObject {
     @Published var refreshNotice: RefreshNotice?
     /// 戳宠物的台词和连戳次数；从随机的一句开始
     var chat = PetChat(pick: .random(in: 0..<6))
+    /// 新版本：有的话面板和菜单里出现更新按钮
+    @Published var update: UpdateStatus = .none
 }
 
 /// 面板根视图：设置和读数一变，原地重画（不重建窗口，焦点和当前页都留着）
@@ -43,6 +45,7 @@ struct OfficialPanelRoot: View {
     var onOpenAntigravity: () -> Void
     var onShellSetup: () -> Void
     var onRefresh: (OfficialQuotaEntry) -> Void
+    var onUpdate: () -> Void = {}
     /// 页面的自然高度变了（换页签、换页面、读数更新）：外面平滑地把窗口调到这个高度
     var onHeight: (CGFloat) -> Void
     var onQuit: () -> Void
@@ -67,6 +70,7 @@ struct OfficialPanelRoot: View {
                                      onMenu: { state.page = .settings }, onQuit: onQuit,
                                      pokeArtwork: pokeArtwork,
                                      onPoke: { mood in state.chat.poke(mood: mood, now: Date()) },
+                                     update: state.update, onUpdate: onUpdate,
                                      pinFooter: true, onHeight: onHeight)
             case .settings:
                 ScrollView {
@@ -123,6 +127,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
     private var menuTracking = false
     private var revealPending = false
     private let antigravityURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.antigravity")
+    private lazy var updater = AppUpdater(settings: settings, state: state)
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -164,6 +169,18 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         }.store(in: &subscriptions)
         settings.$language.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateReading() }
             .store(in: &subscriptions)
+        // 新版本：每天查一次（演示、预览、自检都不建这个控制器的联网部分）
+        if settings.allowsSystemActions {
+            updater.onChange = { [weak self] in self?.rebuild() }
+            updater.prepareExit = { [weak self] in
+                self?.agyMonitor.stop()
+                self?.claudeMonitor.stop()
+            }
+            settings.$checkForUpdates.dropFirst().sink { [weak self] _ in
+                DispatchQueue.main.async { self?.updater.settingChanged() }
+            }.store(in: &subscriptions)
+            updater.start()
+        }
         usageStore?.$snapshots.receive(on: RunLoop.main).sink { [weak self] _ in
             DispatchQueue.main.async { self?.updateUsage() }  // @Published 在赋值之前就通知：等新值落定再读
         }.store(in: &subscriptions)
@@ -269,6 +286,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
                           onOpenAntigravity: { [weak self] in self?.launchAntigravity() },
                           onShellSetup: { [weak self] in self?.shellSetup() },
                           onRefresh: { [weak self] entry in self?.refresh(entry) },
+                          onUpdate: { [weak self] in self?.updater.install() },
                           onHeight: { [weak self] height in self?.setPanelHeight(height) },
                           onQuit: { [weak self] in self?.quit() })
     }
@@ -430,6 +448,17 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         refresh.representedObject = settings.officialPetChoice.entry
         refresh.keyEquivalent = "r"
         refresh.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+        if let offer = state.update.offer {
+            let title: String
+            switch state.update {
+            case .downloading, .installing: title = tr("正在更新到 \(offer.version)…", "Updating to \(offer.version)…")
+            case .failed: title = tr("打开 \(offer.version) 的发布页…", "Open the \(offer.version) release page…")
+            default: title = tr("更新到 \(offer.version)…", "Update to \(offer.version)…")
+            }
+            let update = action(title, #selector(installUpdate), in: menu)
+            update.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            update.isEnabled = !state.update.busy
+        }
         menu.addItem(.separator())
         menu.addItem(.sectionHeader(title: tr("官方额度", "Official usage")))
         for entry in OfficialQuotaEntry.allCases {
@@ -731,6 +760,10 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
 
     @objc private func refreshCurrent(_ sender: NSMenuItem) {
         refresh(sender.representedObject as? OfficialQuotaEntry ?? settings.officialPetChoice.entry)
+    }
+
+    @objc private func installUpdate() {
+        updater.install()
     }
 
     @objc private func openPanel() {

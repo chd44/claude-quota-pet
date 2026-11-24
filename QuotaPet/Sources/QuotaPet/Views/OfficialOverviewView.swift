@@ -42,6 +42,9 @@ struct OfficialOverviewView: View {
     @State private var agyFrame: OfficialPetChoice.Reaction?
     /// 戳了一下宠物：外面按连戳次数挑一句回话（没反应时是 nil）
     var onPoke: (PetMood) -> (line: String, annoyed: Bool)? = { _ in nil }
+    /// 新版本：有的话页脚上方出现更新条
+    var update: UpdateStatus = .none
+    var onUpdate: () -> Void = {}
     /// 渲染预览图时固定「现在」
     var fixedNow: Date?
     /// 面板里用：页脚贴在窗口底边、上面可滚动，并把页面的自然高度报给外面（外面据此平滑伸缩窗口）。预览图不用
@@ -76,6 +79,7 @@ struct OfficialOverviewView: View {
             .padding([.horizontal, .top], 14)
             .padding(.bottom, 14)
         let bottom = VStack(spacing: 12) {
+            if update.offer != nil { UpdateBar(status: update, action: onUpdate) }
             Divider()
             footer(now: now)
         }
@@ -975,6 +979,76 @@ struct OfficialEntryCard: View {
 }
 
 /// 胶囊按钮（和接力卡片的「查看」按钮同一种画法：ImageRenderer 画不出系统样式的按钮）
+/// 有新版本时页脚上方的一条：说是哪个版本，点了自动下载安装；正在下载 / 安装时转圈；没成功时说原因、改为打开发布页
+struct UpdateBar: View {
+    var status: UpdateStatus
+    var action: () -> Void
+
+    var body: some View {
+        if let offer = status.offer {
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title(offer))
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    if let detail {
+                        Text(detail)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 4)
+                if status.busy {
+                    ProgressView().controlSize(.small)
+                } else if case .failed = status {
+                    CapsuleButton(title: tr("打开发布页", "Release page"), systemImage: "arrow.up.forward.square", prominent: false, action: action)
+                } else if offer.download == nil {
+                    CapsuleButton(title: tr("去下载", "Download"), systemImage: "arrow.up.forward.square", action: action)
+                } else {
+                    CapsuleButton(title: tr("更新", "Update"), systemImage: "arrow.down.circle", action: action)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(tint.opacity(0.1)))
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var icon: String {
+        if case .failed = status { return "exclamationmark.circle.fill" }
+        return "arrow.down.circle.fill"
+    }
+
+    private var tint: Color {
+        if case .failed = status { return Color(nsColor: .systemOrange) }
+        return .accentColor
+    }
+
+    private func title(_ offer: UpdateOffer) -> String {
+        switch status {
+        case .downloading: return tr("正在下载 \(offer.version)…", "Downloading \(offer.version)…")
+        case .installing: return tr("正在安装，马上重新打开…", "Installing, reopening shortly…")
+        case .failed: return tr("没能自动更新到 \(offer.version)", "Couldn't update to \(offer.version) automatically")
+        default: return tr("有新版本 \(offer.version)", "Version \(offer.version) is available")
+        }
+    }
+
+    private var detail: String? {
+        switch status {
+        case .failed(_, let reason): return tr("\(reason)。可以去发布页手动下载。", "\(reason). You can download it from the release page.")
+        case .available(let offer) where offer.download == nil:
+            return tr("这一版要去发布页手动下载", "This version needs a manual download from the release page")
+        case .available: return tr("点「更新」自动下载，校验后替换并重新打开", "Click Update to download, verify, replace and reopen")
+        default: return nil
+        }
+    }
+}
+
 struct CapsuleButton: View {
     var title: String
     var systemImage: String

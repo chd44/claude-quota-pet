@@ -51,6 +51,26 @@ enum OfficialPreviews {
                 }
             }
         }
+        // 有新版本、自动更新没成功时页脚上方的更新条（合成的版本号和地址，不联网）
+        let offer = UpdateOffer(version: "0.4.5", pageURL: AppUpdate.releasesPage,
+                                download: .init(url: AppUpdate.releasesPage, sha256: String(repeating: "0", count: 64), size: 1))
+        for language in Language.allCases {
+            L10n.language = language
+            let lang = language == .zhHans ? "" : "-\(language.rawValue)"
+            let updates: [(String, UpdateStatus)] = [
+                ("official-update", .available(offer)),
+                ("official-update-failed", .failed(offer, tr("下载失败", "Download failed"))),
+            ]
+            for (name, status) in updates {
+                for dark in [false, true] {
+                    let view = OfficialOverviewView(entry: .claude, choice: OfficialPetChoice(rawValue: PetStyle.classic.rawValue)!,
+                                                    artwork: artwork, usage: usage, desktopRunning: true, canOpenAntigravity: true,
+                                                    update: status, fixedNow: now)
+                    PreviewRenderer.write(PreviewRenderer.renderInWindow(view, dark: dark),
+                                          to: dir.appendingPathComponent("\(name)\(lang)\(dark ? "-dark" : "").png"))
+                }
+            }
+        }
         for language in Language.allCases {
             L10n.language = language
             let lang = language == .zhHans ? "" : "-\(language.rawValue)"
