@@ -7,14 +7,20 @@ public final class ProcessExit: @unchecked Sendable {
     private let semaphore = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var exited = false
+    private var waiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
 
     public init(_ process: Process) {
         process.terminationHandler = { [weak self] _ in
             guard let self else { return }
             self.lock.lock()
             self.exited = true
+            let pending = self.waiters
+            self.waiters.removeAll()
             self.lock.unlock()
             self.semaphore.signal()
+            for continuation in pending.values {
+                continuation.resume(returning: true)
+            }
         }
     }
 
@@ -34,5 +40,31 @@ public final class ProcessExit: @unchecked Sendable {
             return true
         }
         return hasExited
+    }
+
+    /// 异步等到结束或超时，不阻塞 Swift 协作线程池。可以重复调用
+    @discardableResult
+    public func waitAsync(timeout: TimeInterval) async -> Bool {
+        if hasExited { return true }
+        let id = UUID()
+        let duration = max(0, timeout)
+        return await withCheckedContinuation { continuation in
+            lock.lock()
+            if exited {
+                lock.unlock()
+                continuation.resume(returning: true)
+                return
+            }
+            waiters[id] = continuation
+            lock.unlock()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + duration) { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                let pending = self.waiters.removeValue(forKey: id)
+                let done = self.exited
+                self.lock.unlock()
+                pending?.resume(returning: done)
+            }
+        }
     }
 }

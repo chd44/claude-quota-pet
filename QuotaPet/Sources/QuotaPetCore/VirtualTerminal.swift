@@ -10,6 +10,8 @@ public struct VirtualTerminal: Sendable {
     private var row = 0
     private var column = 0
     private var saved = (0, 0)
+    /// 切入备用屏幕（?1049h / ?47h / ?1047h）时暂存主屏幕内容与光标，退出备用屏时还原
+    private var primaryBuffer: (screen: [[Character]], row: Int, column: Int, saved: (Int, Int))?
     /// 上一次没处理完的字节（一个控制序列或 UTF-8 字符被切成两段送来）
     private var pending: [UInt8] = []
 
@@ -17,6 +19,10 @@ public struct VirtualTerminal: Sendable {
         self.rows = rows
         self.columns = columns
         screen = Array(repeating: Array(repeating: " ", count: columns), count: rows)
+    }
+
+    private func blankScreen() -> [[Character]] {
+        Array(repeating: Array(repeating: " ", count: columns), count: rows)
     }
 
     /// 屏幕上的每一行（去掉行尾空格）
@@ -117,6 +123,14 @@ public struct VirtualTerminal: Sendable {
         case UInt8(ascii: "8"):
             (row, column) = saved
             return 2
+        case UInt8(ascii: "M"):
+            if row == 0 {
+                screen.removeLast()
+                screen.insert(blankRow(), at: 0)
+            } else {
+                row -= 1
+            }
+            return 2
         case UInt8(ascii: "("), UInt8(ascii: ")"):
             return start + 2 < input.count ? 3 : nil
         default:
@@ -124,9 +138,32 @@ public struct VirtualTerminal: Sendable {
         }
     }
 
+    private func blankRow() -> [Character] { Array(repeating: " ", count: columns) }
+
     private mutating func csi(_ parameters: String, final: UInt8) {
-        // 私有模式（?、>、=）只是开关终端特性，屏幕内容不变
-        if let first = parameters.first, "?>=<".contains(first) { return }
+        // 私有模式（?、>、=）：只处理备用屏幕切换（?1049 / ?47 / ?1047），其余开关屏幕内容不变
+        if let first = parameters.first, "?>=<".contains(first) {
+            if first == "?", final == UInt8(ascii: "h") || final == UInt8(ascii: "l") {
+                for mode in parameters.dropFirst().split(separator: ";") {
+                    switch (final, mode) {
+                    case (UInt8(ascii: "h"), "1049"):
+                        if primaryBuffer == nil { primaryBuffer = (screen, row, column, saved) }
+                        screen = blankScreen(); row = 0; column = 0; saved = (0, 0)
+                    case (UInt8(ascii: "h"), "47"), (UInt8(ascii: "h"), "1047"):
+                        if primaryBuffer == nil { primaryBuffer = (screen, row, column, saved) }
+                        screen = blankScreen(); row = 0; column = 0
+                    case (UInt8(ascii: "l"), "1049"), (UInt8(ascii: "l"), "47"), (UInt8(ascii: "l"), "1047"):
+                        if let savedPrimary = primaryBuffer {
+                            screen = savedPrimary.screen; row = savedPrimary.row
+                            column = savedPrimary.column; saved = savedPrimary.saved
+                            primaryBuffer = nil
+                        }
+                    default: break
+                    }
+                }
+            }
+            return
+        }
         let numbers = parameters.split(separator: ";", omittingEmptySubsequences: false).map { Int($0) ?? 0 }
         func arg(_ index: Int, _ fallback: Int = 1) -> Int {
             index < numbers.count && numbers[index] > 0 ? numbers[index] : fallback
@@ -144,6 +181,20 @@ public struct VirtualTerminal: Sendable {
         case UInt8(ascii: "H"), UInt8(ascii: "f"):
             row = min(rows - 1, arg(0) - 1)
             column = min(columns - 1, arg(1) - 1)
+        case UInt8(ascii: "L"):
+            let n = min(rows - row, arg(0))
+            for _ in 0..<n { screen.removeLast(); screen.insert(blankRow(), at: row) }
+            column = 0
+        case UInt8(ascii: "M"):
+            let n = min(rows - row, arg(0))
+            for _ in 0..<n { screen.remove(at: row); screen.append(blankRow()) }
+            column = 0
+        case UInt8(ascii: "S"):
+            let n = min(rows, arg(0))
+            for _ in 0..<n { screen.removeFirst(); screen.append(blankRow()) }
+        case UInt8(ascii: "T"):
+            let n = min(rows, arg(0))
+            for _ in 0..<n { screen.removeLast(); screen.insert(blankRow(), at: 0) }
         case UInt8(ascii: "K"):
             switch raw(0) {
             case 0: clear(row: row, from: column, to: columns)

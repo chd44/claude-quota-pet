@@ -67,20 +67,21 @@ final class AppUpdater {
         var request = URLRequest(url: AppUpdate.latestReleaseURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("QuotaPet/\(current)", forHTTPHeaderField: "User-Agent")
-        let session = URLSession(configuration: Self.sessionConfiguration)
+        let session = URLSession(configuration: Self.sessionConfiguration(resourceTimeout: 45))
         defer { session.finishTasksAndInvalidate() }
         guard let (data, response) = try? await session.data(for: request, delegate: RedirectGuard()),
               (response as? HTTPURLResponse)?.statusCode == 200, data.count < 2_000_000 else { return nil }
         return AppUpdate.parse(data, current: current)
     }
 
-    /// 不存 cookie、不用缓存、不带凭据
-    nonisolated static var sessionConfiguration: URLSessionConfiguration {
+    /// 不存 cookie、不用缓存、不带凭据，同时限制总资源超时（防止慢速连接永久卡住）
+    nonisolated static func sessionConfiguration(resourceTimeout: TimeInterval = 60) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
+        configuration.timeoutIntervalForResource = resourceTimeout
         return configuration
     }
 
@@ -154,7 +155,7 @@ final class AppUpdater {
         let fm = FileManager.default
         let folder = try fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: target.app, create: true)
         do {
-            let session = URLSession(configuration: sessionConfiguration)
+            let session = URLSession(configuration: sessionConfiguration(resourceTimeout: 300))
             defer { session.finishTasksAndInvalidate() }
             var request = URLRequest(url: download.url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
             request.setValue("QuotaPet/\(version)", forHTTPHeaderField: "User-Agent")
@@ -167,7 +168,7 @@ final class AppUpdater {
                 throw UpdateError(tr("下载的文件和 GitHub 上登记的不一致", "The download doesn't match what GitHub lists"))
             }
             let unpacked = folder.appendingPathComponent("new", isDirectory: true)
-            try run("/usr/bin/ditto", ["-x", "-k", zip.path, unpacked.path])
+            try await run("/usr/bin/ditto", ["-x", "-k", zip.path, unpacked.path])
             try? fm.removeItem(at: zip)
             let apps = (try fm.contentsOfDirectory(at: unpacked, includingPropertiesForKeys: nil)).filter { $0.pathExtension == "app" }
             guard apps.count == 1, let app = apps.first,
@@ -176,7 +177,7 @@ final class AppUpdater {
                   info["CFBundleShortVersionString"] as? String == version else {
                 throw UpdateError(tr("安装包内容不对", "The update package isn't what was expected"))
             }
-            try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
+            try await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
             let script = folder.appendingPathComponent("swap.sh")
             try swapScript.write(to: script, atomically: true, encoding: .utf8)
             return Staged(newApp: app, folder: folder, script: script)
@@ -230,7 +231,7 @@ final class AppUpdater {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    nonisolated static func run(_ tool: String, _ arguments: [String]) throws {
+    nonisolated static func run(_ tool: String, _ arguments: [String]) async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tool)
         process.arguments = arguments
@@ -238,9 +239,12 @@ final class AppUpdater {
         process.standardError = FileHandle.nullDevice
         let finished = ProcessExit(process)  // 不用 waitUntilExit：它偶尔漏掉结束通知、永远不返回
         try process.run()
-        if !finished.wait(timeout: 300) {
-            process.terminate()
-            if !finished.wait(timeout: 5) { kill(process.processIdentifier, SIGKILL); finished.wait(timeout: 5) }
+        if !(await finished.waitAsync(timeout: 300)) {
+            if process.isRunning { process.terminate() }
+            if !(await finished.waitAsync(timeout: 5)) {
+                if process.isRunning, process.processIdentifier > 0 { kill(process.processIdentifier, SIGKILL) }
+                _ = await finished.waitAsync(timeout: 5)
+            }
         }
         // 没确认结束就不读退出码（还在运行时读会崩），按失败处理
         guard finished.hasExited, process.terminationStatus == 0 else {

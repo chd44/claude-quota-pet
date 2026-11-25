@@ -435,10 +435,10 @@ struct OfficialOverviewView: View {
 
     private var sourceHelp: String {
         switch entry {
-        case .claude: return tr("来源：官方 Claude Code CLI 的 /usage，每 15 分钟读一次，用完 Claude Code 后也会自动读",
-                                "Source: the official Claude Code CLI’s /usage, every 15 min and after Claude Code activity")
+        case .claude: return tr("来源：官方 Claude Code CLI 的 /usage，每 12 分钟读一次，用完 Claude Code 后也会自动读",
+                                "Source: the official Claude Code CLI’s /usage, every 12 min and after Claude Code activity")
         case .codex: return tr("来源：Codex 每轮对话后记在本机日志里的官方读数", "Source: official readings Codex logs after every turn")
-        case .antigravity: return tr("来源：官方 agy CLI 的 /usage，每 15 分钟读一次", "Source: the official agy CLI’s /usage, every 15 min")
+        case .antigravity: return tr("来源：官方 agy CLI 的 /usage，每 12 分钟读一次", "Source: the official agy CLI’s /usage, every 12 min")
         }
     }
 }
@@ -936,8 +936,8 @@ struct AgyUnknownCard: View {
             Label {
                 Text(querying
                      ? tr("正在用官方 CLI 读取 /usage…", "Reading /usage with the official CLI…")
-                     : tr("每 15 分钟自动重试；也可以打开 Antigravity，在设置里查看用量。",
-                          "Retries every 15 minutes. You can also open Antigravity and check usage in Settings."))
+                     : tr("会自动重试（最长每 12 分钟一次）；也可以打开 Antigravity，在设置里查看用量。",
+                          "Retries automatically (up to every 12 minutes). You can also open Antigravity and check usage in Settings."))
                     .fixedSize(horizontal: false, vertical: true)
             } icon: {
                 Image(systemName: "info.circle")

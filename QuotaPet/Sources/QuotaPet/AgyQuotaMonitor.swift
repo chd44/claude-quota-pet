@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Network
 import QuotaPetCore
 
 /// 带读取时刻的官方读数
@@ -23,7 +24,7 @@ extension ClaudeUsageReading: TimedReading {
 }
 
 /// Reads only an official CLI while that service is selected; no background service.
-/// 选中时立刻读一次，之后每 15 分钟一次；切走、睡眠、退出时停止。agy 和 Claude 共用这一份调度。
+/// 选中时立刻读一次，之后每 12 分钟一次（有效期内无缝衔接，超过 15 分钟仍判未知）；切走、睡眠、退出时停止。agy 和 Claude 共用这一份调度。
 @MainActor
 final class CLIQuotaMonitor<Reading: TimedReading> {
     private(set) var reading: Reading?
@@ -36,6 +37,7 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
     private(set) var lastQueryEnded: Date?
     /// 最近一次查询开始的时间：和 lastQueryEnded 一起框出 CLI 进程在跑的那段时间
     private(set) var lastQueryStarted: Date?
+    var isSleeping: Bool { policy.sleeping }
     var onChange: (() -> Void)?
     private let enabled: Bool
     private let probe: @Sendable () async -> Reading
@@ -44,7 +46,13 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
     private var policy = AgyRefreshPolicy()
     private var timer: Timer?
     private var task: Task<Void, Never>?
+    private var wakeTask: Task<Void, Never>?
     private var generation = 0
+    private var activeQueryGeneration = 0
+    private var leakedWorkers = 0
+    private static var maxLeakedWorkers: Int { 3 }
+    private var pathMonitor: NWPathMonitor?
+    private var lastNetworkSatisfied: Bool?
     private var observations: Set<AnyCancellable> = []
 
     /// 最近一次可用读数存在本机设置里：重启或刚打开时，有效期内的先拿出来显示，同时照常去读新的
@@ -68,6 +76,17 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
         NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification).sink { [weak self] _ in
             MainActor.assumeIsolated { self?.stop() }
         }.store(in: &observations)
+        if enabled {
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] path in
+                let satisfied = path.status == .satisfied
+                Task { @MainActor [weak self] in
+                    self?.handleNetworkUpdate(satisfied)
+                }
+            }
+            monitor.start(queue: DispatchQueue(label: "QuotaPet.network-path", qos: .utility))
+            pathMonitor = monitor
+        }
     }
 
     func select(_ requestedSelection: Bool) {
@@ -76,25 +95,37 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
         policy.select(selected)
         generation += 1
         reading = nil
+        lastResult = nil
         history = []
         if selected {
-            if let cached = loadCache(), (0..<AgyRefreshPolicy.interval).contains(Date().timeIntervalSince(cached.checkedAt)) {
+            if let cached = loadCache(), (0..<AgyRefreshPolicy.validity).contains(Date().timeIntervalSince(cached.checkedAt)) {
                 reading = cached
                 history = [cached]
             }
-            armTimer()
             refreshIfDue()
+            armTimer()
         } else {
             timer?.invalidate()
             timer = nil
+            wakeTask?.cancel()
+            wakeTask = nil
             task?.cancel()
             querying = false
+            if task != nil {
+                armWatchdog(id: queryID, requestGeneration: activeQueryGeneration, timeout: AgyRefreshPolicy.cancelledTimeout)
+            }
         }
         onChange?()
     }
 
     func stop() {
         select(false)
+        watchdog?.cancel()
+        watchdog = nil
+        wakeTask?.cancel()
+        wakeTask = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
         observations.removeAll()
     }
 
@@ -103,8 +134,14 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
         generation += 1
         timer?.invalidate()
         timer = nil
+        wakeTask?.cancel()
+        wakeTask = nil
+        lastResult = nil
         task?.cancel()
         querying = false
+        if task != nil {
+            armWatchdog(id: queryID, requestGeneration: activeQueryGeneration, timeout: AgyRefreshPolicy.cancelledTimeout)
+        }
         onChange?()
     }
 
@@ -112,19 +149,38 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
         policy.setSleeping(false)
         if policy.selected {
             armTimer()
-            refreshIfDue()
+            wakeTask?.cancel()
+            wakeTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(AgyRefreshPolicy.wakeDelay * 1_000_000_000))
+                guard !Task.isCancelled, let self, self.policy.selected, !self.policy.sleeping else { return }
+                self.wakeTask = nil
+                self.refreshIfDue()
+                self.armTimer()
+            }
         }
         onChange?()
     }
 
+    private func handleNetworkUpdate(_ satisfied: Bool) {
+        let recovered = (lastNetworkSatisfied == false) && satisfied
+        lastNetworkSatisfied = satisfied
+        guard recovered, policy.beginOnNetworkRecovery(now: Date()) else { return }
+        startQuery()
+    }
+
     private func armTimer() {
         timer?.invalidate()
+        timer = nil
         guard policy.selected, !policy.sleeping else { return }
         // Common modes allow expiry to update even while the menu is tracking.
         let now = Date()
-        var delay = policy.delayUntilDue(now: now)
-        if let change = nextChange(reading, now), change > now { delay = min(delay, change.timeIntervalSince(now)) }
-        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+        var delay: TimeInterval? = policy.inFlight ? nil : policy.delayUntilDue(now: now)
+        if let change = nextChange(reading, now), change > now {
+            let untilChange = change.timeIntervalSince(now)
+            delay = delay.map { min($0, untilChange) } ?? untilChange
+        }
+        guard let delay else { return }
+        let timer = Timer(timeInterval: max(0.5, delay), repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshIfDue()
                 self?.onChange?()
@@ -174,31 +230,50 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
     private var watchdog: Task<Void, Never>?
 
     private func startQuery() {
+        if leakedWorkers >= Self.maxLeakedWorkers {
+            policy.finish(usable: false, now: Date())
+            querying = false
+            onChange?()
+            armTimer()
+            return
+        }
+        wakeTask?.cancel()
+        wakeTask = nil
         querying = true
         lastQueryStarted = Date()
+        lastResult = nil
         queryID += 1
         let id = queryID
         let requestGeneration = generation
+        activeQueryGeneration = requestGeneration
         let probe = self.probe
         onChange?()
+        armTimer()
         task = Task { [weak self] in
             let result = await probe()
-            guard let self, id == self.queryID else { return }  // 已被看门狗放弃
+            guard let self else { return }
+            if id != self.queryID {
+                self.leakedWorkers = max(0, self.leakedWorkers - 1)
+                return  // 已被看门狗放弃
+            }
             self.watchdog?.cancel()
             self.watchdog = nil
             self.lastQueryEnded = Date()
             self.task = nil
             if requestGeneration == self.generation, self.policy.selected, !self.policy.sleeping {
+                let now = Date()
                 // 失败了就隔几分钟重试（见 AgyRefreshPolicy.dueInterval）
-                self.policy.finish(usable: result.isUsable)
+                self.policy.finish(usable: result.isUsable, now: now)
                 // 偶发失败不顶掉还在有效期内的上一次读数
                 let keep = AgyRefreshPolicy.keepsPrevious(previousUsable: self.reading?.isUsable == true,
                                                           previousCheckedAt: self.reading?.checkedAt,
-                                                          newUsable: result.isUsable, newIsUnknown: result.isUnknown, now: Date())
+                                                          newUsable: result.isUsable, newIsUnknown: result.isUnknown, now: now)
                 if !keep { self.reading = result }
                 self.lastResult = result
-                self.history = (self.history + [result]).filter { result.checkedAt.timeIntervalSince($0.checkedAt) < 25 * 3600 }
-                if result.isUsable { self.saveCache(result) }
+                if result.isUsable {
+                    self.history = (self.history + [result]).filter { result.checkedAt.timeIntervalSince($0.checkedAt) < 25 * 3600 }
+                    self.saveCache(result)
+                }
                 self.querying = false
                 self.onChange?()
                 self.armTimer()
@@ -207,29 +282,45 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
                 self.policy.finish()
                 self.querying = false
                 self.refreshIfDue()
+                self.armTimer()
             }
         }
         // 看门狗：探测自己最长 45 秒加几秒收尾，超过 2 分钟还没回来就是卡住了（不管什么原因），
         // 当这次失败放掉，后面的定时、活动和手动刷新照常进行，不再一直显示「正在读取」
+        armWatchdog(id: id, requestGeneration: requestGeneration, timeout: AgyRefreshPolicy.queryTimeout)
+    }
+
+    private func armWatchdog(id: Int, requestGeneration: Int, timeout: TimeInterval) {
         watchdog?.cancel()
         watchdog = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(AgyRefreshPolicy.queryTimeout * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
             guard !Task.isCancelled, let self, id == self.queryID, self.task != nil else { return }
-            self.abandonQuery()
+            self.abandonQuery(requestGeneration: requestGeneration)
         }
     }
 
-    private func abandonQuery() {
+    private func abandonQuery(requestGeneration: Int) {
         queryID += 1  // 迟到的结果丢掉
+        leakedWorkers += 1
         task?.cancel()
         task = nil
         watchdog = nil
-        lastQueryEnded = Date()
+        let now = Date()
+        lastQueryEnded = lastQueryStarted.map { min(now, $0.addingTimeInterval(55)) } ?? now
         lastResult = nil  // 手动刷新的提示报「没读到新的额度」
-        policy.finish(usable: false)
-        querying = false
-        onChange?()
-        armTimer()
+        let stillActive = requestGeneration == generation && policy.selected && !policy.sleeping
+        if stillActive {
+            policy.finish(usable: false, now: now)
+            querying = false
+            onChange?()
+            armTimer()
+        } else {
+            policy.finish()
+            querying = false
+            if policy.selected && !policy.sleeping { refreshIfDue() }
+            onChange?()
+            armTimer()
+        }
     }
 
 }

@@ -59,61 +59,52 @@ struct ClaudeQuotaProbe: Sendable {
         } catch {
             return .init(status: .unknown, message: tr("无法创建专用空查询目录", "Couldn’t create the dedicated check folder"))
         }
-        let started = Date()
         // 这次查询自己的会话 ID：清理时只删它，不碰同一文件夹里别的会话
         let sessionID = UUID()
         defer { ClaudeSessionCleanup.remove(sessionID: sessionID, workingDirectory: directory, home: fm.homeDirectoryForCurrentUser) }
 
-        var master: Int32 = -1, slave: Int32 = -1
-        var size = winsize(ws_row: rows, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0)
-        guard openpty(&master, &slave, nil, nil, &size) == 0 else {
-            return .init(status: .unknown, message: tr("无法启动官方交互终端", "Couldn’t start the official interactive terminal"))
-        }
-        let terminal = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
-        defer { try? terminal.close(); close(master) }
-        _ = fcntl(master, F_SETFL, O_NONBLOCK)
-        let process = Process()
-        process.executableURL = binary
-        process.arguments = ["--safe-mode", "--strict-mcp-config", "--tools", "",
-                             "--session-id", ClaudeSessionCleanup.idString(sessionID)]
-        process.currentDirectoryURL = directory
-        process.standardInput = terminal; process.standardOutput = terminal; process.standardError = terminal
         // 只给普通的系统环境变量；不碰 CLI 的登录存储
         let inherited = ProcessInfo.processInfo.environment
         var environment: [String: String] = [:]
         for key in ["HOME", "PATH", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "SHELL"] { environment[key] = inherited[key] }
         environment["TERM"] = "xterm-256color"
-        process.environment = environment
-        let finished = ProcessExit(process)  // 先挂上结束回调再启动
-        do { try process.run() } catch {
+        let process: PTYProcess
+        do {
+            process = try PTYProcess(
+                executableURL: binary,
+                arguments: ["--safe-mode", "--strict-mcp-config", "--tools", "",
+                            "--session-id", ClaudeSessionCleanup.idString(sessionID)],
+                workingDirectory: directory,
+                environment: environment,
+                rows: rows,
+                columns: columns
+            )
+        } catch PTYProcessError.ptyCreationFailed {
+            return .init(status: .unknown, message: tr("无法启动官方交互终端", "Couldn’t start the official interactive terminal"))
+        } catch {
             return .init(status: .unknown, message: tr("官方 CLI 启动失败", "The official CLI failed to start"))
         }
-        defer {
-            if process.isRunning {
-                send("\u{1B}", to: master)
-                usleep(200_000)
-                send("/exit\r", to: master)
-                finished.wait(timeout: 1.5)
-            }
-            if process.isRunning { process.terminate() }
-            // 每一步都限时：不用 waitUntilExit，它偶尔漏掉结束通知、永远不返回
-            if !finished.wait(timeout: 2) {
-                kill(process.processIdentifier, SIGKILL)
-                finished.wait(timeout: 2)
-            }
-        }
+        defer { process.closeMaster() }
+        let result = await runLoop(process: process)
+        await shutdown(process: process)
+        return result
+    }
 
+    private static func runLoop(process: PTYProcess) async -> ClaudeUsageReading {
+        var nowUptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
         var screen = VirtualTerminal(rows: Int(rows), columns: Int(columns))
         var received = 0
-        var lastByte = Date()
+        let started = nowUptime
+        var lastByte = started
+        var lastParse = started
         var answered: Set<String> = []
         var downPresses = 0
-        var sentAt: Date?
-        while Date().timeIntervalSince(started) < 45 {
+        var sentAt: TimeInterval?
+        while nowUptime - started < 45 {
             if Task.isCancelled { return .init(status: .unknown, message: tr("查询已取消", "Query cancelled")) }
             var chunk = [UInt8](repeating: 0, count: 32768)
             let exited = !process.isRunning  // 先看是否已退出、再读：退出前写出的内容这一次一定读得到
-            let count = Darwin.read(master, &chunk, chunk.count)
+            let count = process.read(into: &chunk)
             if exited, count <= 0 {
                 // CLI 自己退出了（比如旧版本不认 --session-id）：不用等到超时。先认一次最后的画面：
                 // 最后出现的是登录提示就是要登录（屏幕上残留的旧额度文字不算数）
@@ -130,16 +121,24 @@ struct ClaudeQuotaProbe: Sendable {
             if count > 0 {
                 screen.feed(Array(chunk.prefix(count)))
                 received += count
-                lastByte = Date()
+                lastByte = nowUptime
                 guard received < 4_000_000 else {
                     return .init(status: .unknown, message: tr("官方终端输出超出安全上限", "Official terminal output exceeded the safety limit"))
                 }
             }
-            // 画面安静下来再判断，免得在半帧上按键
-            guard Date().timeIntervalSince(lastByte) > 0.8 else {
+            // 画面安静下来再判断，免得在半帧上按键；若持续有微小刷新且面板已完整显示，每秒仍尝试解析一次
+            if nowUptime - lastByte <= 0.8 {
+                if sentAt != nil, nowUptime - lastParse > 1.0 {
+                    lastParse = nowUptime
+                    if ClaudeCLIScreen.finalScreen(screen) == .usageReady {
+                        let reading = ClaudeUsageParser.parse(screen, now: Date())
+                        if reading.status == .available { return reading }
+                    }
+                }
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 continue
             }
+            lastParse = nowUptime
             // 屏幕上还残留着额度文字、最后却是登录提示：按登录处理，不拿残留的数字当读数
             switch ClaudeCLIScreen.finalScreen(screen) {
             case .login:
@@ -152,7 +151,7 @@ struct ClaudeQuotaProbe: Sendable {
                     return .init(status: .confirmationRequired, message: tr("官方 CLI 需要交互确认", "The official CLI needs confirmation"))
                 }
                 answered.insert(key)
-                send("\r", to: master); lastByte = Date()
+                process.write("\r"); lastByte = nowUptime
             case .trust(let yesSelected):
                 // 只信任这个专用空目录；默认选项是「否」，先移到「是」
                 guard !answered.contains("trust") else {
@@ -160,26 +159,28 @@ struct ClaudeQuotaProbe: Sendable {
                 }
                 if yesSelected {
                     answered.insert("trust")
-                    send("\r", to: master)
+                    process.write("\r")
                 } else {
                     guard downPresses < 2 else {
                         return .init(status: .confirmationRequired, message: tr("官方 CLI 需要交互确认", "The official CLI needs confirmation"))
                     }
                     downPresses += 1
-                    send("\u{1B}[B", to: master)
+                    process.write("\u{1B}[B")
                 }
-                lastByte = Date()
+                lastByte = nowUptime
             case .prompt:
                 if let sentAt {
                     // 发了 /usage 却又回到输入框：面板没出来
-                    if Date().timeIntervalSince(sentAt) > 12 {
+                    if nowUptime - sentAt > 12 {
                         return .init(status: .unknown, message: tr("官方 /usage 面板没有出现", "The official /usage panel didn’t appear"))
                     }
                 } else {
-                    send("/usage", to: master)
-                    usleep(500_000)
-                    send("\r", to: master)
-                    sentAt = Date(); lastByte = Date()
+                    process.write("/usage")
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    if Task.isCancelled { return .init(status: .unknown, message: tr("查询已取消", "Query cancelled")) }
+                    process.write("\r")
+                    let now = nowUptime
+                    sentAt = now; lastByte = now
                 }
             case .usageLoading:
                 break  // 面板还在刷新：等最终的数字
@@ -195,8 +196,21 @@ struct ClaudeQuotaProbe: Sendable {
         return .init(status: .unknown, message: tr("官方额度查询超时或面板格式未识别", "The official quota query timed out or the panel wasn’t recognised"))
     }
 
-    private static func send(_ text: String, to master: Int32) {
-        _ = text.withCString { Darwin.write(master, $0, strlen($0)) }
+    private static func shutdown(process: PTYProcess) async {
+        if !Task.isCancelled, process.isRunning {
+            process.write("\u{1B}")
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            if !Task.isCancelled, process.isRunning {
+                process.write("/exit\r")
+                _ = await process.drainWhileWaiting(timeout: 1.5)
+            }
+        }
+        if !process.hasExited, process.isRunning { process.terminate() }
+        // 每一步都限时：不用 waitUntilExit，它偶尔漏掉结束通知、永远不返回；也不阻塞协作线程池
+        if !(await process.drainWhileWaiting(timeout: 2)) {
+            if process.isRunning { process.forceKill() }
+            _ = await process.waitAsync(timeout: 2)
+        }
     }
 
 }

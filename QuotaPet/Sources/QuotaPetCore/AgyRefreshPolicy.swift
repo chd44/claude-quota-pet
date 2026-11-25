@@ -2,30 +2,50 @@ import Foundation
 
 /// Scheduling only; never infers quota from local activity.
 public struct AgyRefreshPolicy: Sendable {
-    public static let interval: TimeInterval = 15 * 60
+    /// 读数的有效期（超过即未知，绝不放宽）
+    public static let validity: TimeInterval = 15 * 60
+    public static let interval: TimeInterval = validity
+    /// 定时读取的间隔：在 15 分钟有效期结束前提前 3 分钟发起，偶发失败后能在过期前重试一次
+    public static let refreshInterval: TimeInterval = 12 * 60
     public private(set) var selected = false
     public private(set) var sleeping = false
     public private(set) var inFlight = false
     private var lastAttempt: Date?
+    private var lastFailureAt: Date?
     /// 连续读失败的次数；读到可用读数就清零
     public private(set) var failures = 0
 
-    /// 读失败后第一次重试的间隔，之后每次翻倍，最长回到 interval
-    public static let retryBase: TimeInterval = 2 * 60
+    /// 读失败后第一次重试的间隔，之后每次翻倍，最长回到 refreshInterval
+    public static let retryBase: TimeInterval = 60
 
     /// 一次查询最长等多久：探测本身最长 45 秒加几秒收尾，超过这个就当卡住了放弃
     public static let queryTimeout: TimeInterval = 2 * 60
 
+    /// 因睡眠或切走而被取消的查询，最多再等这么久就释放并发占位
+    public static let cancelledTimeout: TimeInterval = 15
+
+    /// 唤醒后先等系统 Wi-Fi / DNS 恢复再发起首次查询
+    public static let wakeDelay: TimeInterval = 6
+
+    /// 网络从断开恢复时触发快速重试的最短间隔
+    public static let networkRecoveryGap: TimeInterval = 15
+
     public init() {}
 
-    /// 下一次定时读取离上次开始读的间隔：正常 15 分钟；刚失败过就 2、4、8 分钟后重试，不让一次偶发失败拖成 15 分钟的未知
+    /// 下一次定时读取离上次开始（或失败）的间隔：正常 12 分钟；刚失败过就 1、2、4、8 分钟后重试，最长回到 12 分钟
     public var dueInterval: TimeInterval {
-        guard failures > 0 else { return Self.interval }
-        return min(Self.interval, Self.retryBase * pow(2, Double(min(failures, 8) - 1)))
+        guard failures > 0 else { return Self.refreshInterval }
+        return min(Self.refreshInterval, Self.retryBase * pow(2, Double(min(failures, 8) - 1)))
     }
 
+    private var scheduleAnchor: Date? { failures > 0 ? (lastFailureAt ?? lastAttempt) : lastAttempt }
+
     public mutating func select(_ selected: Bool) {
-        if self.selected != selected { lastAttempt = nil; failures = 0 }
+        if self.selected != selected {
+            lastAttempt = nil
+            lastFailureAt = nil
+            failures = 0
+        }
         self.selected = selected
     }
 
@@ -33,8 +53,19 @@ public struct AgyRefreshPolicy: Sendable {
 
     public mutating func begin(now: Date) -> Bool {
         guard selected, !sleeping, !inFlight else { return false }
-        if let lastAttempt, now.timeIntervalSince(lastAttempt) >= 0,
-           now.timeIntervalSince(lastAttempt) < dueInterval { return false }
+        if let anchor = scheduleAnchor, now.timeIntervalSince(anchor) >= 0,
+           now.timeIntervalSince(anchor) < dueInterval { return false }
+        lastAttempt = now
+        inFlight = true
+        return true
+    }
+
+    /// 断网恢复时：之前读失败过且当前没在读，隔开防抖时间后立即重试一次
+    public mutating func beginOnNetworkRecovery(now: Date) -> Bool {
+        guard selected, !sleeping, !inFlight, failures > 0 else { return false }
+        if let recent = [lastAttempt, lastFailureAt].compactMap({ $0 }).max(),
+           now.timeIntervalSince(recent) >= 0,
+           now.timeIntervalSince(recent) < Self.networkRecoveryGap { return false }
         lastAttempt = now
         inFlight = true
         return true
@@ -51,7 +82,7 @@ public struct AgyRefreshPolicy: Sendable {
         return Self.manualGap - since
     }
 
-    /// 用户点了刷新：不等 15 分钟，但离上次开始读至少 manualGap，且不和正在进行的读取并发
+    /// 用户点了刷新：不等定时周期，但离上次开始读至少 manualGap，且不和正在进行的读取并发
     public mutating func beginManual(now: Date) -> Bool {
         guard selected, !sleeping, !inFlight else { return false }
         if let lastAttempt, now.timeIntervalSince(lastAttempt) >= 0, now.timeIntervalSince(lastAttempt) < Self.manualGap { return false }
@@ -73,15 +104,21 @@ public struct AgyRefreshPolicy: Sendable {
     }
 
     public func delayUntilDue(now: Date) -> TimeInterval {
-        guard let lastAttempt else { return Self.interval }
-        return max(1, dueInterval - max(0, now.timeIntervalSince(lastAttempt)))
+        guard let anchor = scheduleAnchor else { return Self.refreshInterval }
+        return max(1, dueInterval - max(0, now.timeIntervalSince(anchor)))
     }
 
     /// 一次读取结束；usable：读到了可用的额度。nil：读取作废（切走、睡眠），不算成败
-    public mutating func finish(usable: Bool? = nil) {
+    public mutating func finish(usable: Bool? = nil, now: Date? = nil) {
         inFlight = false
         guard let usable else { return }
-        failures = usable ? 0 : failures + 1
+        if usable {
+            failures = 0
+            lastFailureAt = nil
+        } else {
+            failures += 1
+            lastFailureAt = now ?? lastAttempt
+        }
     }
 
     /// 新一次读取没读到可靠读数（status 是未知：超时、面板没出来、版式没认出）时，
@@ -89,7 +126,7 @@ public struct AgyRefreshPolicy: Sendable {
     /// 明确的状态（要登录、要确认、没装 CLI）照常替换：那是现在的真实情况
     public static func keepsPrevious(previousUsable: Bool, previousCheckedAt: Date?, newUsable: Bool, newIsUnknown: Bool, now: Date) -> Bool {
         guard !newUsable, newIsUnknown, previousUsable, let previousCheckedAt else { return false }
-        return (0..<interval).contains(now.timeIntervalSince(previousCheckedAt))
+        return (0..<validity).contains(now.timeIntervalSince(previousCheckedAt))
     }
 }
 

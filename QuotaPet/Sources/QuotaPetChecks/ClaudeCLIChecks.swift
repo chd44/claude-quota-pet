@@ -27,6 +27,21 @@ func checkClaudeCLIUsage() {
     var clear = VirtualTerminal(rows: 3, columns: 10)
     clear.feed("x\r\ny\r\nz\u{1B}[2J")
     check(clear.normalizedText.isEmpty, "清屏")
+    var alt = VirtualTerminal(rows: 3, columns: 20)
+    alt.feed("banner\r\n> \u{1B}[?1049h\u{1B}[Halt-line")
+    check(alt.lines == ["alt-line", "", ""], "进入备用屏（?1049h）清屏且不残留主屏内容")
+    alt.feed("\u{1B}[?1049l")
+    check(alt.lines[0] == "banner" && alt.lines[1] == ">", "退出备用屏（?1049l）恢复主屏内容")
+    var vertical = VirtualTerminal(rows: 3, columns: 10)
+    vertical.feed("L1\r\nL2\r\nL3")
+    vertical.feed("\u{1B}[1;1H\u{1B}Mtop")
+    check(vertical.lines == ["top", "L1", "L2"], "ESC M 反向换行下推屏幕")
+    vertical.feed("\u{1B}[2;1H\u{1B}[1Lmid")
+    check(vertical.lines == ["top", "mid", "L1"], "CSI L 插入空行")
+    vertical.feed("\u{1B}[2;1H\u{1B}[1M")
+    check(vertical.lines == ["top", "L1", ""], "CSI M 删除当前行")
+    vertical.feed("\u{1B}[1S\u{1B}[1T")
+    check(vertical.lines == ["", "L1", ""], "CSI S/T 上下滚屏")
 
     // MARK: 面板画面
     let now = Date(timeIntervalSince1970: 1_795_000_000)  // 2026-11-18 某时（UTC）

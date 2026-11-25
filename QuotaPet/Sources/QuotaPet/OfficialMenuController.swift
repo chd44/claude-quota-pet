@@ -435,8 +435,8 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         }
         let note = claudeMonitor.querying
             ? tr("正在用官方 Claude Code CLI 读取 /usage…", "Reading /usage with the official Claude Code CLI…")
-            : tr("会用官方 Claude Code CLI 读取 /usage，每 15 分钟一次。",
-                 "QuotaPet reads /usage with the official Claude Code CLI every 15 minutes.")
+            : tr("会用官方 Claude Code CLI 读取 /usage，每 12 分钟一次。",
+                 "QuotaPet reads /usage with the official Claude Code CLI every 12 minutes.")
         return UsageSnapshot(provider: .claude, windows: [], generatedAt: now, notes: [note], hasData: false)
     }
 
@@ -737,8 +737,12 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
 
     private func manualRefresh<R: TimedReading>(_ entry: OfficialQuotaEntry, _ monitor: CLIQuotaMonitor<R>) {
         let now = Date()
-        if monitor.refreshNow() || monitor.querying {
-            refreshRequests[entry] = now  // 正好在自动读：这次读完也报结果
+        if monitor.refreshNow() {
+            refreshRequests[entry] = now
+            state.manualRefreshing.insert(entry)
+        } else if monitor.querying {
+            // 正好在自动读（可能已读到额度、正在收尾）：按这次查询开始时间记，免得 checkedAt 早于点击时间误报失败
+            refreshRequests[entry] = min(now, monitor.lastQueryStarted ?? now)
             state.manualRefreshing.insert(entry)
         } else {
             showNotice(.tooSoon(entry: entry, wait: monitor.manualWait(now: now), now: now))
@@ -750,6 +754,7 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         guard let requested = refreshRequests[entry], !monitor.querying else { return }
         refreshRequests[entry] = nil
         state.manualRefreshing.remove(entry)
+        if monitor.isSleeping { return }
         // 按这一次读取本身报：失败时 reading 可能还留着上一次的读数
         let result = monitor.lastResult
         showNotice(.cliFinished(entry: entry, usable: result?.isUsable ?? false, checkedAt: result?.checkedAt,

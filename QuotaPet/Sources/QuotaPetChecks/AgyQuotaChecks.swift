@@ -279,22 +279,40 @@ func checkRedrawAndActivityRefresh() {
     // 发了 /usage、面板还在加载：屏幕上只有启动横幅的「not signed in」，不能当结论
     var waiting = VirtualTerminal(rows: 70, columns: 220)
     waiting.feed("Welcome to the Antigravity CLI. You are currently not signed in.\r\n> ")
-    let baseline = AgyQuotaParser.noticeLines(waiting)
+    let baseline = AgyQuotaParser.noticeSet(waiting)
     waiting.feed("/usage\r\n")
     let early = AgyQuotaParser.parse(terminal: waiting, now: now)
-    check(early.status == .signInRequired && !AgyQuotaParser.settles(early, noticeLines: AgyQuotaParser.noticeLines(waiting), baseline: baseline),
+    check(early.status == .signInRequired && !AgyQuotaParser.settles(early, notices: AgyQuotaParser.noticeSet(waiting), baseline: baseline),
           "agy 面板还没出来时，横幅里的「not signed in」不算未登录，接着等")
+    waiting.feed("\u{1B}[5;1HWelcome to the Antigravity CLI. You are currently not signed in.\r\n")
+    let redrawn = AgyQuotaParser.parse(terminal: waiting, now: now)
+    check(!AgyQuotaParser.settles(redrawn, notices: AgyQuotaParser.noticeSet(waiting), baseline: baseline),
+          "agy 重画时横幅多出重复行，内容没变也不误判未登录")
     waiting.feed(panel("51.83%", "34.19%"))
     let late = AgyQuotaParser.parse(terminal: waiting, now: now)
-    check(late.status == .available && AgyQuotaParser.settles(late, noticeLines: AgyQuotaParser.noticeLines(waiting), baseline: baseline),
+    check(late.status == .available && AgyQuotaParser.settles(late, notices: AgyQuotaParser.noticeSet(waiting), baseline: baseline),
           "agy 面板出来后照常读到额度")
     var loggedOut = VirtualTerminal(rows: 70, columns: 220)
     loggedOut.feed("Welcome to the Antigravity CLI. You are currently not signed in.\r\n> ")
-    let loggedOutBaseline = AgyQuotaParser.noticeLines(loggedOut)
+    let loggedOutBaseline = AgyQuotaParser.noticeSet(loggedOut)
     loggedOut.feed("/usage\r\nPlease sign in to view your quota.\r\n")
     let real = AgyQuotaParser.parse(terminal: loggedOut, now: now)
-    check(real.status == .signInRequired && AgyQuotaParser.settles(real, noticeLines: AgyQuotaParser.noticeLines(loggedOut), baseline: loggedOutBaseline),
+    check(real.status == .signInRequired && AgyQuotaParser.settles(real, notices: AgyQuotaParser.noticeSet(loggedOut), baseline: loggedOutBaseline),
           "agy 发命令后新冒出登录提示才判为需要登录")
+    var clearedLoggedOut = VirtualTerminal(rows: 70, columns: 220)
+    clearedLoggedOut.feed("Welcome to the Antigravity CLI. You are currently not signed in.\r\n> ")
+    let clearedBaseline = AgyQuotaParser.noticeSet(clearedLoggedOut)
+    clearedLoggedOut.feed("\u{1B}[2J\u{1B}[HPlease sign in to view your quota.\r\n")
+    let realAfterClear = AgyQuotaParser.parse(terminal: clearedLoggedOut, now: now)
+    check(realAfterClear.status == .signInRequired
+          && AgyQuotaParser.settles(realAfterClear, notices: AgyQuotaParser.noticeSet(clearedLoggedOut), baseline: clearedBaseline),
+          "agy 横幅被清掉后换成新登录提示也能立即判为需要登录")
+    var startupBannerOnly = VirtualTerminal(rows: 70, columns: 220)
+    startupBannerOnly.feed("Welcome to the Antigravity CLI. You are currently not signed in.\r\nSigning in...\r\n")
+    check(!AgyQuotaParser.startupSignInRequired(startupBannerOnly), "启动横幅加登录动画时不误判启动未登录")
+    var startupLoginMenu = VirtualTerminal(rows: 70, columns: 220)
+    startupLoginMenu.feed("Welcome to the Antigravity CLI. You are currently not signed in.\r\nSelect login method:\r\n> 1. Google OAuth\r\n")
+    check(AgyQuotaParser.startupSignInRequired(startupLoginMenu), "启动阶段明确停在登录选择界面时立即判未登录")
     var partial = VirtualTerminal(rows: 70, columns: 220)
     partial.feed(panel("62.50%", "24.25%"))
     partial.feed("\u{1B}[4;9H40.00%")  // 只局部重画一个数字

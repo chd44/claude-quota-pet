@@ -34,24 +34,33 @@ public struct AgyQuotaReading: Codable, Sendable {
 /// Only accepts an explicitly labelled remaining percentage column. A changed or
 /// unrecognised official terminal layout is unknown, never zero or an estimate.
 public enum AgyQuotaParser {
-    static let signInMarkers = ["not signed in", "sign in to", "log in to"]
+    static let signInMarkers = ["not signed in", "sign in to", "log in to", "select login method", "not logged in", "please run /login"]
+    static let startupLoginMarkers = ["select login method", "please sign in", "sign in to", "log in to", "please run /login", "not logged in"]
     static let confirmMarkers = ["do you trust", "enter confirm", "permission required"]
 
-    /// 屏幕上带登录或确认提示的行数
-    public static func noticeLines(_ terminal: VirtualTerminal) -> Int {
-        terminal.lines.filter { line in
-            let lower = line.lowercased()
-            return (signInMarkers + confirmMarkers).contains { lower.contains($0) }
-        }.count
+    /// 启动阶段（还没发 /usage）就已经明确停在登录交互界面（不含启动横幅里瞬时的 "You are currently not signed in"）
+    public static func startupSignInRequired(_ terminal: VirtualTerminal) -> Bool {
+        let lower = terminal.normalizedText.lowercased()
+        return startupLoginMarkers.contains { lower.contains($0) }
+    }
+
+    /// 屏幕上带登录或确认提示的去重标准化行集合
+    public static func noticeSet(_ terminal: VirtualTerminal) -> Set<String> {
+        Set(terminal.lines.compactMap { line -> String? in
+            let normalized = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "[ \t]+", with: " ", options: .regularExpression)
+                .lowercased()
+            guard !normalized.isEmpty else { return nil }
+            return (signInMarkers + confirmMarkers).contains { normalized.contains($0) } ? normalized : nil
+        })
     }
 
     /// 发出 /usage 之后的这次解析能不能当最终结果。读到额度就算；「要登录」「要确认」只有在发命令之后
-    /// 屏幕上新冒出提示（比发命令时多）才算：agy 启动横幅即使已登录也写着「not signed in」，
-    /// 面板还在联网加载、屏幕暂时安静时不能拿横幅判成未登录。其余接着等，直到超时
-    public static func settles(_ reading: AgyQuotaReading, noticeLines: Int, baseline: Int) -> Bool {
+    /// 屏幕上出现了此前没有的新提示内容才算：既不受启动横幅重画多出一份的影响，也能在横幅被清掉、换出真正登录提示时立即认出
+    public static func settles(_ reading: AgyQuotaReading, notices: Set<String>, baseline: Set<String>) -> Bool {
         switch reading.status {
         case .available: return true
-        case .signInRequired, .confirmationRequired: return noticeLines > baseline
+        case .signInRequired, .confirmationRequired: return !notices.subtracting(baseline).isEmpty
         case .unknown, .unavailable: return false
         }
     }
