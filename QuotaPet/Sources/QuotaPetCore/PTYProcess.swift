@@ -28,7 +28,12 @@ public final class PTYProcess: @unchecked Sendable {
         rows: UInt16,
         columns: UInt16
     ) throws {
-        let master = posix_openpt(O_RDWR | O_NOCTTY)
+        // 同时启动多个子进程时 posix_openpt 偶尔失败（并发 20 个时约 8%），稍等重试几次就好
+        var master = posix_openpt(O_RDWR | O_NOCTTY)
+        for attempt in 1...5 where master < 0 {
+            usleep(useconds_t(20_000 * attempt))
+            master = posix_openpt(O_RDWR | O_NOCTTY)
+        }
         guard master >= 0 else {
             throw PTYProcessError.ptyCreationFailed(errno)
         }
