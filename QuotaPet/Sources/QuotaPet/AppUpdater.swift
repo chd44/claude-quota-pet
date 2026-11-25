@@ -236,9 +236,14 @@ final class AppUpdater {
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        let finished = ProcessExit(process)  // 不用 waitUntilExit：它偶尔漏掉结束通知、永远不返回
         try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        if !finished.wait(timeout: 300) {
+            process.terminate()
+            if !finished.wait(timeout: 5) { kill(process.processIdentifier, SIGKILL); finished.wait(timeout: 5) }
+        }
+        // 没确认结束就不读退出码（还在运行时读会崩），按失败处理
+        guard finished.hasExited, process.terminationStatus == 0 else {
             throw UpdateError(tool.hasSuffix("codesign") ? tr("新版签名校验没通过", "The new version failed its signature check")
                                                          : tr("解压失败", "Couldn't unpack the update"))
         }

@@ -34,6 +34,28 @@ public struct AgyQuotaReading: Codable, Sendable {
 /// Only accepts an explicitly labelled remaining percentage column. A changed or
 /// unrecognised official terminal layout is unknown, never zero or an estimate.
 public enum AgyQuotaParser {
+    static let signInMarkers = ["not signed in", "sign in to", "log in to"]
+    static let confirmMarkers = ["do you trust", "enter confirm", "permission required"]
+
+    /// 屏幕上带登录或确认提示的行数
+    public static func noticeLines(_ terminal: VirtualTerminal) -> Int {
+        terminal.lines.filter { line in
+            let lower = line.lowercased()
+            return (signInMarkers + confirmMarkers).contains { lower.contains($0) }
+        }.count
+    }
+
+    /// 发出 /usage 之后的这次解析能不能当最终结果。读到额度就算；「要登录」「要确认」只有在发命令之后
+    /// 屏幕上新冒出提示（比发命令时多）才算：agy 启动横幅即使已登录也写着「not signed in」，
+    /// 面板还在联网加载、屏幕暂时安静时不能拿横幅判成未登录。其余接着等，直到超时
+    public static func settles(_ reading: AgyQuotaReading, noticeLines: Int, baseline: Int) -> Bool {
+        switch reading.status {
+        case .available: return true
+        case .signInRequired, .confirmationRequired: return noticeLines > baseline
+        case .unknown, .unavailable: return false
+        }
+    }
+
     /// 从还原好的终端屏幕解析：只看现在显示的这一屏（局部重画、清屏后的旧帧不算）
     public static func parse(terminal: VirtualTerminal, now: Date = Date()) -> AgyQuotaReading {
         parse(terminal.lines.joined(separator: "\n"), now: now)
@@ -48,10 +70,10 @@ public enum AgyQuotaParser {
         // 还原整屏后它会留在面板上方，不能因此判成未登录
         let hasPanel = lower.contains("quota") && lower.contains("within each group") && lower.contains("5-hour limit")
         if !hasPanel {
-            if lower.contains("not signed in") || lower.contains("sign in to") || lower.contains("log in to") {
+            if signInMarkers.contains(where: { lower.contains($0) }) {
                 return .init(status: .signInRequired, checkedAt: now, message: "请先在官方 agy CLI 登录")
             }
-            if lower.contains("do you trust") || lower.contains("enter confirm") || lower.contains("permission required") {
+            if confirmMarkers.contains(where: { lower.contains($0) }) {
                 return .init(status: .confirmationRequired, checkedAt: now, message: "官方 CLI 需要交互确认")
             }
             return .init(status: .unknown, checkedAt: now, message: "未识别官方额度面板")

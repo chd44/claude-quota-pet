@@ -7,15 +7,19 @@ protocol TimedReading: Codable, Sendable {
     var checkedAt: Date { get }
     /// 读到了可用的额度（只缓存这种）
     var isUsable: Bool { get }
+    /// 没读到可靠读数、也说不出明确原因（超时、面板没出来、版式没认出）
+    var isUnknown: Bool { get }
     /// 读不到时官方 CLI 给的原因（可能为空）
     var message: String { get }
 }
 
 extension AgyQuotaReading: TimedReading {
     var isUsable: Bool { status == .available }
+    var isUnknown: Bool { status == .unknown }
 }
 extension ClaudeUsageReading: TimedReading {
     var isUsable: Bool { status == .available }
+    var isUnknown: Bool { status == .unknown }
 }
 
 /// Reads only an official CLI while that service is selected; no background service.
@@ -23,6 +27,8 @@ extension ClaudeUsageReading: TimedReading {
 @MainActor
 final class CLIQuotaMonitor<Reading: TimedReading> {
     private(set) var reading: Reading?
+    /// 最近一次读取本身的结果（失败也记）：偶发失败时 reading 还留着上一次的可用读数，手动刷新的提示要按这一次报成败和原因
+    private(set) var lastResult: Reading?
     /// 最近 25 小时的读数，只在内存里（算按官方读数的消耗速度用）
     private(set) var history: [Reading] = []
     private(set) var querying = false
@@ -163,20 +169,34 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
         return true
     }
 
+    /// 每次查询的编号：看门狗放弃一次查询后，它迟到的结果按编号认出来丢掉
+    private var queryID = 0
+    private var watchdog: Task<Void, Never>?
+
     private func startQuery() {
         querying = true
         lastQueryStarted = Date()
+        queryID += 1
+        let id = queryID
         let requestGeneration = generation
         let probe = self.probe
         onChange?()
         task = Task { [weak self] in
             let result = await probe()
-            guard let self else { return }
+            guard let self, id == self.queryID else { return }  // 已被看门狗放弃
+            self.watchdog?.cancel()
+            self.watchdog = nil
             self.lastQueryEnded = Date()
-            self.policy.finish()
             self.task = nil
             if requestGeneration == self.generation, self.policy.selected, !self.policy.sleeping {
-                self.reading = result
+                // 失败了就隔几分钟重试（见 AgyRefreshPolicy.dueInterval）
+                self.policy.finish(usable: result.isUsable)
+                // 偶发失败不顶掉还在有效期内的上一次读数
+                let keep = AgyRefreshPolicy.keepsPrevious(previousUsable: self.reading?.isUsable == true,
+                                                          previousCheckedAt: self.reading?.checkedAt,
+                                                          newUsable: result.isUsable, newIsUnknown: result.isUnknown, now: Date())
+                if !keep { self.reading = result }
+                self.lastResult = result
                 self.history = (self.history + [result]).filter { result.checkedAt.timeIntervalSince($0.checkedAt) < 25 * 3600 }
                 if result.isUsable { self.saveCache(result) }
                 self.querying = false
@@ -184,10 +204,32 @@ final class CLIQuotaMonitor<Reading: TimedReading> {
                 self.armTimer()
             } else {
                 // A cancelled process must finish before a new selection may read.
+                self.policy.finish()
                 self.querying = false
                 self.refreshIfDue()
             }
         }
+        // 看门狗：探测自己最长 45 秒加几秒收尾，超过 2 分钟还没回来就是卡住了（不管什么原因），
+        // 当这次失败放掉，后面的定时、活动和手动刷新照常进行，不再一直显示「正在读取」
+        watchdog?.cancel()
+        watchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(AgyRefreshPolicy.queryTimeout * 1_000_000_000))
+            guard !Task.isCancelled, let self, id == self.queryID, self.task != nil else { return }
+            self.abandonQuery()
+        }
+    }
+
+    private func abandonQuery() {
+        queryID += 1  // 迟到的结果丢掉
+        task?.cancel()
+        task = nil
+        watchdog = nil
+        lastQueryEnded = Date()
+        lastResult = nil  // 手动刷新的提示报「没读到新的额度」
+        policy.finish(usable: false)
+        querying = false
+        onChange?()
+        armTimer()
     }
 
 }

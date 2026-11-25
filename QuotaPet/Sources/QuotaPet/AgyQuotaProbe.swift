@@ -47,15 +47,19 @@ struct AgyQuotaProbe: Sendable {
         for key in ["HOME", "PATH", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "SHELL"] { environment[key] = inherited[key] }
         environment["TERM"] = "xterm-256color"
         process.environment = environment
+        let finished = ProcessExit(process)  // 先挂上结束回调再启动
         do { try process.run() } catch { return .init(status: .unknown, message: "官方 CLI 启动失败") }
         defer {
             if process.isRunning { process.terminate() }
-            let deadline = Date().addingTimeInterval(2)
-            while process.isRunning && Date() < deadline { usleep(50_000) }
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            process.waitUntilExit()
+            // 每一步都限时：不用 waitUntilExit，它偶尔漏掉结束通知、永远不返回
+            if !finished.wait(timeout: 2) {
+                kill(process.processIdentifier, SIGKILL)
+                finished.wait(timeout: 2)
+            }
         }
         var output = Data(), sent = false, trusted = false
+        // 发 /usage 那一刻屏幕上已有的登录/确认提示行数（启动横幅等）：之后只认新冒出来的
+        var noticeBaseline = 0
         // 面板会局部重画：按伪终端同样的行列数还原「现在屏幕上显示的」，只解析这一屏，旧帧不会混进来
         var terminalScreen = VirtualTerminal(rows: Int(size.ws_row), columns: Int(size.ws_col))
         let start = Date()
@@ -81,13 +85,16 @@ struct AgyQuotaProbe: Sendable {
                 let plain = screen.replacingOccurrences(of: "\u{1B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
                 let hasPrompt = plain.range(of: "(?m)^[ \t]*[›❯>][ \t]*$", options: .regularExpression) != nil
                 if Date() >= readyAt && hasPrompt && plain.lowercased().contains("gemini") && !plain.contains("Do you trust") {
+                    noticeBaseline = AgyQuotaParser.noticeLines(terminalScreen)
                     let command = "/usage\r"
                     _ = command.withCString { Darwin.write(master, $0, command.utf8.count) }
                     output.removeAll(); sent = true; lastByte = Date()
                 }
             } else if Date().timeIntervalSince(lastByte) > 1.0 {
                 let reading = AgyQuotaParser.parse(terminal: terminalScreen)
-                if reading.status != .unknown { return reading }
+                if AgyQuotaParser.settles(reading, noticeLines: AgyQuotaParser.noticeLines(terminalScreen), baseline: noticeBaseline) {
+                    return reading
+                }
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }

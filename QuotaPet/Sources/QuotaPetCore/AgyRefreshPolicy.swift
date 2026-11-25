@@ -7,11 +7,25 @@ public struct AgyRefreshPolicy: Sendable {
     public private(set) var sleeping = false
     public private(set) var inFlight = false
     private var lastAttempt: Date?
+    /// 连续读失败的次数；读到可用读数就清零
+    public private(set) var failures = 0
+
+    /// 读失败后第一次重试的间隔，之后每次翻倍，最长回到 interval
+    public static let retryBase: TimeInterval = 2 * 60
+
+    /// 一次查询最长等多久：探测本身最长 45 秒加几秒收尾，超过这个就当卡住了放弃
+    public static let queryTimeout: TimeInterval = 2 * 60
 
     public init() {}
 
+    /// 下一次定时读取离上次开始读的间隔：正常 15 分钟；刚失败过就 2、4、8 分钟后重试，不让一次偶发失败拖成 15 分钟的未知
+    public var dueInterval: TimeInterval {
+        guard failures > 0 else { return Self.interval }
+        return min(Self.interval, Self.retryBase * pow(2, Double(min(failures, 8) - 1)))
+    }
+
     public mutating func select(_ selected: Bool) {
-        if self.selected != selected { lastAttempt = nil }
+        if self.selected != selected { lastAttempt = nil; failures = 0 }
         self.selected = selected
     }
 
@@ -20,7 +34,7 @@ public struct AgyRefreshPolicy: Sendable {
     public mutating func begin(now: Date) -> Bool {
         guard selected, !sleeping, !inFlight else { return false }
         if let lastAttempt, now.timeIntervalSince(lastAttempt) >= 0,
-           now.timeIntervalSince(lastAttempt) < Self.interval { return false }
+           now.timeIntervalSince(lastAttempt) < dueInterval { return false }
         lastAttempt = now
         inFlight = true
         return true
@@ -60,10 +74,23 @@ public struct AgyRefreshPolicy: Sendable {
 
     public func delayUntilDue(now: Date) -> TimeInterval {
         guard let lastAttempt else { return Self.interval }
-        return max(1, Self.interval - max(0, now.timeIntervalSince(lastAttempt)))
+        return max(1, dueInterval - max(0, now.timeIntervalSince(lastAttempt)))
     }
 
-    public mutating func finish() { inFlight = false }
+    /// 一次读取结束；usable：读到了可用的额度。nil：读取作废（切走、睡眠），不算成败
+    public mutating func finish(usable: Bool? = nil) {
+        inFlight = false
+        guard let usable else { return }
+        failures = usable ? 0 : failures + 1
+    }
+
+    /// 新一次读取没读到可靠读数（status 是未知：超时、面板没出来、版式没认出）时，
+    /// 上一次可用读数还在有效期内就继续显示它，不让一次偶发失败把还能用的数字换成「额度未知」。
+    /// 明确的状态（要登录、要确认、没装 CLI）照常替换：那是现在的真实情况
+    public static func keepsPrevious(previousUsable: Bool, previousCheckedAt: Date?, newUsable: Bool, newIsUnknown: Bool, now: Date) -> Bool {
+        guard !newUsable, newIsUnknown, previousUsable, let previousCheckedAt else { return false }
+        return (0..<interval).contains(now.timeIntervalSince(previousCheckedAt))
+    }
 }
 
 /// Claude Code 干活后的自动读取：每次检查时做什么

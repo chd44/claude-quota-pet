@@ -36,6 +36,7 @@ L10n.language = .zhHans
 
 lifecycleChecks()
 agyRefreshChecks()
+processExitChecks()
 agyPresentationChecks()
 agyResetChecks()
 checkAgyQuotaParser()

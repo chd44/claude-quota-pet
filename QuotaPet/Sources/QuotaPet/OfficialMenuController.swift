@@ -750,8 +750,10 @@ final class OfficialMenuController: NSObject, NSMenuDelegate, NSPopoverDelegate,
         guard let requested = refreshRequests[entry], !monitor.querying else { return }
         refreshRequests[entry] = nil
         state.manualRefreshing.remove(entry)
-        showNotice(.cliFinished(entry: entry, usable: monitor.reading?.isUsable ?? false, checkedAt: monitor.reading?.checkedAt,
-                                requestedAt: requested, message: monitor.reading?.message ?? "", now: Date()))
+        // 按这一次读取本身报：失败时 reading 可能还留着上一次的读数
+        let result = monitor.lastResult
+        showNotice(.cliFinished(entry: entry, usable: result?.isUsable ?? false, checkedAt: result?.checkedAt,
+                                requestedAt: requested, message: result?.isUsable == true ? "" : result?.message ?? "", now: Date()))
     }
 
     private func showNotice(_ notice: RefreshNotice) {

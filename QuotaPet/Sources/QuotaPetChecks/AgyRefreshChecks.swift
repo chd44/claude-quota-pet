@@ -26,6 +26,42 @@ func agyRefreshChecks() {
     check(!policy.begin(now: now.addingTimeInterval(904)), "短暂休眠醒来保留未过期读数")
     policy.select(false)
     check(!policy.begin(now: now.addingTimeInterval(2_000)), "离开 agy 停止定时查询")
+
+    // 读失败后 2、4、8 分钟重试，最长回到 15 分钟；读到一次就恢复 15 分钟
+    var retry = AgyRefreshPolicy()
+    retry.select(true)
+    check(retry.begin(now: now), "首读")
+    retry.finish(usable: false)
+    check(retry.dueInterval == 120 && !retry.begin(now: now.addingTimeInterval(119)), "失败后不到 2 分钟不重试")
+    check(retry.delayUntilDue(now: now.addingTimeInterval(60)) == 60, "失败后定时器按 2 分钟排")
+    check(retry.begin(now: now.addingTimeInterval(120)), "失败后 2 分钟重试，不等 15 分钟")
+    retry.finish(usable: false)
+    check(retry.dueInterval == 240, "连续失败间隔翻倍")
+    for _ in 0..<10 { _ = retry.begin(now: now.addingTimeInterval(100_000)); retry.finish(usable: false) }
+    check(retry.dueInterval == AgyRefreshPolicy.interval, "一直失败最长 15 分钟一次")
+    let failuresBefore = retry.failures
+    _ = retry.begin(now: now.addingTimeInterval(200_000))
+    retry.finish()
+    check(retry.failures == failuresBefore && retry.failures > 0, "作废的读取不算成败")
+    _ = retry.begin(now: now.addingTimeInterval(300_000))
+    retry.finish(usable: true)
+    check(retry.failures == 0 && retry.dueInterval == AgyRefreshPolicy.interval, "读到一次就清零")
+    retry.finish(usable: false)
+    retry.select(false); retry.select(true)
+    check(retry.failures == 0, "重新选中从头算")
+
+    // 偶发失败不顶掉有效期内的旧读数；明确的状态照常替换
+    let old = now.addingTimeInterval(-300)
+    check(AgyRefreshPolicy.keepsPrevious(previousUsable: true, previousCheckedAt: old, newUsable: false, newIsUnknown: true, now: now),
+          "超时/未识别时保留 5 分钟前的可用读数")
+    check(!AgyRefreshPolicy.keepsPrevious(previousUsable: true, previousCheckedAt: now.addingTimeInterval(-901), newUsable: false, newIsUnknown: true, now: now),
+          "旧读数过了 15 分钟就不保留")
+    check(!AgyRefreshPolicy.keepsPrevious(previousUsable: true, previousCheckedAt: old, newUsable: false, newIsUnknown: false, now: now),
+          "要登录、要确认等明确状态替换旧读数")
+    check(!AgyRefreshPolicy.keepsPrevious(previousUsable: false, previousCheckedAt: old, newUsable: false, newIsUnknown: true, now: now),
+          "旧的本来就不可用时不保留")
+    check(!AgyRefreshPolicy.keepsPrevious(previousUsable: true, previousCheckedAt: old, newUsable: true, newIsUnknown: false, now: now),
+          "新读数可用时用新的")
 }
 
 func agyPresentationChecks() {
@@ -108,4 +144,40 @@ func agyResetChecks() {
     check(RefreshNotice.tooSoon(entry: .claude, wait: 19.2, now: now).text.contains("20"), "刚读过：等待秒数向上取整")
     check(RefreshNotice.codexReloaded(officialAt: nil, now: now).kind == .failed, "Codex 日志里没有读数：没读到")
     check(RefreshNotice.codexReloaded(officialAt: now.addingTimeInterval(-120), now: now).kind == .done, "Codex 有读数：已刷新")
+}
+
+/// 等子进程结束：限时、不卡死（代替 waitUntilExit）
+func processExitChecks() {
+    func launch(_ seconds: String) -> (Process, ProcessExit) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = [seconds]
+        let finished = ProcessExit(process)
+        try! process.run()
+        return (process, finished)
+    }
+    let (quick, quickExit) = launch("0")
+    check(quickExit.wait(timeout: 5) && quickExit.hasExited && quick.terminationStatus == 0, "很快结束的进程：等得到结束")
+    check(quickExit.wait(timeout: 0), "重复等也立刻返回已结束")
+
+    let (slow, slowExit) = launch("30")
+    let started = Date()
+    check(!slowExit.wait(timeout: 0.3) && !slowExit.hasExited, "还在跑的进程：到时间就返回，不一直等")
+    check(Date().timeIntervalSince(started) < 3, "超时返回得及时")
+    slow.terminate()
+    check(slowExit.wait(timeout: 5), "结束之后等得到")
+
+    // 从并发线程池里同时等很多个很快退出的进程：每个都要在限时内等到（原来 waitUntilExit 在这种线程上偶尔永远不返回）
+    let group = DispatchGroup()
+    let lock = NSLock()
+    var missed = 0
+    for _ in 0..<40 {
+        group.enter()
+        Task.detached {
+            let (_, finished) = launch("0")
+            if !finished.wait(timeout: 10) { lock.withLock { missed += 1 } }
+            group.leave()
+        }
+    }
+    check(group.wait(timeout: .now() + 60) == .success && missed == 0, "并发等 40 个子进程都在限时内等到结束")
 }

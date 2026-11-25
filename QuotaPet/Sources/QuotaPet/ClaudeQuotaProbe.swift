@@ -84,6 +84,7 @@ struct ClaudeQuotaProbe: Sendable {
         for key in ["HOME", "PATH", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "SHELL"] { environment[key] = inherited[key] }
         environment["TERM"] = "xterm-256color"
         process.environment = environment
+        let finished = ProcessExit(process)  // 先挂上结束回调再启动
         do { try process.run() } catch {
             return .init(status: .unknown, message: tr("官方 CLI 启动失败", "The official CLI failed to start"))
         }
@@ -92,14 +93,14 @@ struct ClaudeQuotaProbe: Sendable {
                 send("\u{1B}", to: master)
                 usleep(200_000)
                 send("/exit\r", to: master)
-                let polite = Date().addingTimeInterval(1.5)
-                while process.isRunning && Date() < polite { usleep(50_000) }
+                finished.wait(timeout: 1.5)
             }
             if process.isRunning { process.terminate() }
-            let deadline = Date().addingTimeInterval(2)
-            while process.isRunning && Date() < deadline { usleep(50_000) }
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            process.waitUntilExit()
+            // 每一步都限时：不用 waitUntilExit，它偶尔漏掉结束通知、永远不返回
+            if !finished.wait(timeout: 2) {
+                kill(process.processIdentifier, SIGKILL)
+                finished.wait(timeout: 2)
+            }
         }
 
         var screen = VirtualTerminal(rows: Int(rows), columns: Int(columns))
