@@ -76,12 +76,9 @@ public final class PTYProcess: @unchecked Sendable {
         }
         defer { posix_spawn_file_actions_destroy(&actions) }
 
-        let chdirRC: Int32
-        if #available(macOS 26.0, *) {
-            chdirRC = posix_spawn_file_actions_addchdir(&actions, workingDirectory.path)
-        } else {
-            chdirRC = posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path)
-        }
+        // 只用 _np 版本：不带 _np 的新名字只在 macOS 26 的 SDK 里声明，旧 SDK（比如 CI）编译不过；
+        // #available 只管运行时，挡不住编译期找不到符号。_np 从 10.15 起都有
+        let chdirRC = posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path)
         guard chdirRC == 0 else {
             close(master)
             throw PTYProcessError.spawnFailed(chdirRC)
