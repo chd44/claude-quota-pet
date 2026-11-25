@@ -15,10 +15,13 @@ if [[ "${UNIVERSAL:-}" == 1 ]]; then
     launcher_bins=()
     for arch in arm64 x86_64; do
         triple="$arch-apple-macosx14.0"
-        swift build -c release --product QuotaPet --triple "$triple"
-        swift build -c release --product QuotaPetLauncher --triple "$triple"
-        launcher_bins+=("$(swift build -c release --triple "$triple" --show-bin-path)/QuotaPetLauncher")
-        bin="$(swift build -c release --triple "$triple" --show-bin-path)/QuotaPet"
+        # 每个架构用自己的构建目录：Swift 6.4 起不同 triple 的产物都放在同一个 .build/out/Products/Release，
+        # 后编的会盖掉先编的（lipo 报「same architectures」）
+        scratch=(--scratch-path ".build/universal-$arch")
+        swift build -c release "${scratch[@]}" --product QuotaPet --triple "$triple"
+        swift build -c release "${scratch[@]}" --product QuotaPetLauncher --triple "$triple"
+        launcher_bins+=("$(swift build -c release "${scratch[@]}" --triple "$triple" --show-bin-path)/QuotaPetLauncher")
+        bin="$(swift build -c release "${scratch[@]}" --triple "$triple" --show-bin-path)/QuotaPet"
         bins+=("$bin")
         if [[ "$arch" == "$(uname -m)" ]]; then BIN="$bin"; fi
     done
